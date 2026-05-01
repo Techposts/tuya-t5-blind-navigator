@@ -33,7 +33,42 @@ are imperative and action-oriented:
 
 See [docs/HARDWARE.md](docs/HARDWARE.md) for full pinout and component reference.
 
-## Architecture
+## Cloud / AI access — pick your path
+
+Two valid options for getting an AI vision/speech response to the board.
+Full comparison in [docs/CLOUD_OPTIONS.md](docs/CLOUD_OPTIONS.md).
+
+### Option A — Tuya Cloud Multimodal AI Platform (Tuya's official path)
+
+Tuya's [TuyaOpen](https://github.com/tuya/TuyaOpen) bridges the device to
+the **Tuya Developer Cloud**, which then bridges out to multiple AI
+providers — **ChatGPT, Gemini, Claude, Qwen, DeepSeek, Amazon Nova** —
+through a single integrated layer. Drag-and-drop AI agent flows, low-latency
+streaming TTS/STT, custom MCP server, auto-generated mobile mini-app. Tuya
+handles the device-to-cloud transport so the T5's mbedTLS quirks aren't
+your problem. Reportedly has a free tier for development — verify on
+[Tuya's pricing page](https://developer.tuya.com).
+
+**Pick this if** you're building a real product, want multi-model flexibility
+without re-flashing, and don't need to own every layer.
+
+### Option B — Local proxy (what this repo implements)
+
+Run a tiny Flask/FastAPI server on your home network. Board → plain HTTP →
+proxy → HTTPS → OpenAI (or any other provider). The proxy is ~30 LoC of
+Python and gives you full control over the prompt, model, request shape,
+cost, and logs.
+
+**Pick this if** you're prototyping, learning, doing content, want full
+control over the prompt + model selection, or want to swap providers
+freely. **This is what's wired up here.**
+
+> Aside: a third option — calling OpenAI's HTTPS API directly from the
+> board — currently fails on TuyaOpen `2240c01e` due to a TLS cipher
+> mismatch (`mbedtls_ssl_handshake returned 0x3a00`). See
+> [docs/LESSONS_LEARNED.md §1](docs/LESSONS_LEARNED.md).
+
+## Architecture (Option B as built)
 
 ```
 [Button/Touch trigger]
@@ -50,12 +85,6 @@ See [docs/HARDWARE.md](docs/HARDWARE.md) for full pinout and component reference
         ▼
 [Response → Bionic Eye UI text panel + gpt-4o-mini-tts audio → speaker]
 ```
-
-The proxy is required because the T5's mbedTLS implementation can't complete
-the TLS handshake with OpenAI directly (cipher-suite mismatch — see
-[docs/LESSONS_LEARNED.md](docs/LESSONS_LEARNED.md)). The proxy sidesteps this
-by terminating HTTPS server-side; the board only ever speaks plain HTTP to the
-proxy on your local network.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full data flow.
 
@@ -107,9 +136,21 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full data flow.
 - **[ARCHITECTURE](docs/ARCHITECTURE.md)** — data flow, components, threading
 - **[HARDWARE](docs/HARDWARE.md)** — board pinout, camera, display specs
 - **[BUILD_AND_FLASH](docs/BUILD_AND_FLASH.md)** — toolchain, common gotchas
+- **[CLOUD_OPTIONS](docs/CLOUD_OPTIONS.md)** — Tuya Cloud vs. local proxy vs. direct
 - **[PROXY_SETUP](docs/PROXY_SETUP.md)** — Flask proxy install + systemd unit
+- **[USE_CASES](docs/USE_CASES.md)** — gesture map (currency, MRP, medication)
 - **[SENSORS_ROADMAP](docs/SENSORS_ROADMAP.md)** — planned mmWave / ToF sensors
 - **[LESSONS_LEARNED](docs/LESSONS_LEARNED.md)** — what failed, how it was diagnosed
+
+Same content also browsable as a [GitHub Wiki](https://github.com/Techposts/tuya-t5-blind-navigator/wiki).
+
+## Related projects
+
+- [tuya/TuyaOpen](https://github.com/tuya/TuyaOpen) — the open-source SDK this
+  app is built on. Their `examples/graphics/lvgl_camera` was the working
+  reference we forked the camera + display init pattern from.
+- [Tuya Developer Platform](https://developer.tuya.com) — Tuya's cloud +
+  multimodal AI service (the alternative to running your own proxy).
 
 ## Status
 
