@@ -160,3 +160,29 @@ work, not an app-level change.
   layer → **Option B**.
 - Building a real product, want fastest time-to-working,
   multi-model flexibility, free-tier friendliness → **Option A**.
+
+## Same pattern, different scope
+
+Worth noting: our local proxy and Tuya Cloud (Option A) implement **the
+same architectural pattern** — a thin server in front of a TLS-limited
+embedded device, fronting multiple AI providers. We just stopped at the
+30-line minimum-viable version; Tuya productized it with managed hosting
+and an agent layer.
+
+| | Local proxy (Option B) | Tuya Cloud (Option A) |
+|---|---|---|
+| Transport | Device→server→AI providers | Device→server→AI providers |
+| Multi-model | Yes (change upstream URL) | Yes (drag-and-drop selector) |
+| Hosted | You (LAN) | Tuya (managed, global) |
+| Auth abstraction | Server holds the API key | Tuya holds keys + free dev licenses |
+| Streaming TTS/STT | Pass-through | Optimized streaming layer |
+| Long/short-term memory | None | Built-in |
+| Custom MCP server | None | Built-in |
+| Companion mini-app | None | Auto-generated |
+| Cost model | You pay each AI provider | Tuya billing + free tier |
+| Time to working | ~30 min (set up Flask + Wi-Fi) | ~hours (account, product, license) |
+
+The proxy approach is the right tool for **prototyping, learning, and
+content** — total transparency, no account dependencies, easy to debug.
+Tuya Cloud is the right tool for **products** — managed scale, free dev
+licenses, agent abstractions, mobile UI.
