@@ -1,0 +1,32 @@
+#pragma once
+
+/* WiFi Credentials List */
+#define NAV_WIFI_PASS         "YOUR_WIFI_PASSWORD"
+
+static const char* const NAV_SSID_LIST[] = {
+    "YOUR_WIFI_SSID"
+};
+#define NAV_SSID_COUNT 1
+
+/* OpenAI API */
+#define OPENAI_API_KEY        "sk-proj-YOUR_OPENAI_API_KEY_HERE"
+
+/* Audio settings */
+#define NAV_SAMPLE_RATE       16000
+#define NAV_CHANNELS          1
+#define NAV_BITS              16
+#define NAV_MAX_RECORD_SEC    8
+#define NAV_MAX_PCM_BYTES     (NAV_SAMPLE_RATE * (NAV_BITS/8) * NAV_CHANNELS * NAV_MAX_RECORD_SEC)
+
+/* OpenAI TTS output sample rate */
+#define OPENAI_TTS_RATE       24000
+
+/* System prompts */
+#define NAV_VISION_PROMPT     "You are a navigation co-pilot for a blind person walking forward. The camera shows their forward view. Give clear, decisive guidance in 2-3 short sentences using this format: 1) PATH STATUS (clear path / obstacle / person / wall / stairs / door), 2) WHERE using clock positions (12 ahead, 3 right, 9 left) and distance in meters or steps, 3) ACTION (go, step left, stop, turn, slow down). Be imperative and present tense. If you read text or signs, say so. Do not describe scenery aesthetically. Never mention image quality, blur, or camera. Never apologize."
+#define NAV_READ_PROMPT       "You are reading text aloud for a blind person. Read every visible word, sign, label, button, price tag, MRP, expiry date, ingredient list, or printed content in the image. Read the largest or most prominent text first. If multiple distinct items, separate them with a short pause. State numeric prices clearly (currency name + amount). If no readable text, say: No text visible. Do not describe the scene aesthetically."
+#define NAV_OBJECT_PROMPT     "You are identifying an object held close to the camera by a blind person. Reply in 1-2 short sentences. Examples: (a) currency note: state currency name and denomination, e.g. \"500 rupee note\" or \"20 dollar bill\"; (b) packaged product: state product name, brand if visible, MRP/price if visible, and expiry date if visible; (c) medication: read the medicine name and dosage from the label; (d) hand-held item (key, phone, remote): name it and any visible color or distinctive marking. Never mention image quality."
+#define NAV_ASR_PROMPT        "You are a helpful voice AI for a visually impaired person. Keep answers to 1-2 sentences."
+
+/* Local proxy on dev VM (terminates HTTPS for the T5's mbedTLS quirk) */
+#define NAV_PROXY_HOST  "192.168.1.100"  /* IP of the machine running openai_proxy.py */
+#define NAV_PROXY_PORT  8888
