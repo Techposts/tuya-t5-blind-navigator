@@ -144,13 +144,27 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full data flow.
 
 Same content also browsable as a [GitHub Wiki](https://github.com/Techposts/tuya-t5-blind-navigator/wiki).
 
-## Related projects
+## TuyaOpen resources (official)
 
-- [tuya/TuyaOpen](https://github.com/tuya/TuyaOpen) — the open-source SDK this
-  app is built on. Their `examples/graphics/lvgl_camera` was the working
-  reference we forked the camera + display init pattern from.
-- [Tuya Developer Platform](https://developer.tuya.com) — Tuya's cloud +
-  multimodal AI service (the alternative to running your own proxy).
+| What | URL |
+|---|---|
+| TuyaOpen home | <https://tuyaopen.ai> |
+| Source code (GitHub) | <https://github.com/tuya/TuyaOpen> |
+| Documentation index | <https://tuyaopen.ai/docs/about-tuyaopen> |
+| Quick-start guide | <https://tuyaopen.ai/docs/quick-start/enviroment-setup> |
+| `tos.py` CLI guide (build/flash tool used here) | <https://tuyaopen.ai/docs/tos-tools/tos-guide> |
+| `tyutool` / web flasher | <https://tuyaopen.ai/tools/tyutool> |
+| **AI Agent Platform** (Option A in [CLOUD_OPTIONS](docs/CLOUD_OPTIONS.md)) | <https://tuyaopen.ai/docs/cloud/tuya-cloud/ai-agent/ai-agent-dev-platform> |
+| **T5AI Board overview** (the hardware this runs on) | <https://tuyaopen.ai/docs/hardware-specific/tuya-t5/t5-ai-board/overview-t5-ai-board> |
+| Pricing (free tier per their badge) | <https://tuyaopen.ai/pricing> |
+| Where to buy the board | <https://tuyaopen.ai/get-hardware> |
+| Reference apps we forked patterns from | `examples/graphics/lvgl_camera` (camera+display init), `apps/tuya.ai/your_chat_bot` (KWS+TTS pattern) |
+| Discord (community) | <https://discord.com/invite/yPPShSTttG> |
+| Issues / bug reports | <https://github.com/tuya/TuyaOpen/issues> |
+| GitHub discussions | <https://github.com/tuya/TuyaOpen/discussions> |
+
+If you want to skip the local-proxy route entirely and use **Tuya Cloud's
+multimodal AI directly** (Option A), start at the [AI Agent Platform docs](https://tuyaopen.ai/docs/cloud/tuya-cloud/ai-agent/ai-agent-dev-platform).
 
 ## Status
 

@@ -15,10 +15,15 @@ agent workflows.
 
 Official references:
 
-- **Source / SDK**: <https://github.com/tuya/TuyaOpen>
-- **Documentation**: <https://tuyaopen.ai/docs/about-tuyaopen>
-- **Pricing**: <https://tuyaopen.ai/pricing> — Tuya advertises a free tier
-  (the TuyaOpen GitHub README displays a "free pricing" badge)
+| Resource | URL |
+|---|---|
+| Source code / SDK | <https://github.com/tuya/TuyaOpen> |
+| Documentation home | <https://tuyaopen.ai/docs/about-tuyaopen> |
+| **AI Agent Platform** (the Option A entry point) | <https://tuyaopen.ai/docs/cloud/tuya-cloud/ai-agent/ai-agent-dev-platform> |
+| Quick-start | <https://tuyaopen.ai/docs/quick-start/enviroment-setup> |
+| Pricing (free tier) | <https://tuyaopen.ai/pricing> |
+| T5AI Board overview | <https://tuyaopen.ai/docs/hardware-specific/tuya-t5/t5-ai-board/overview-t5-ai-board> |
+| Discord community | <https://discord.com/invite/yPPShSTttG> |
 
 | Feature | What you get |
 |---|---|
