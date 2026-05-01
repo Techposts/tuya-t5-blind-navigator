@@ -1,0 +1,24 @@
+# Local secrets — never commit
+firmware/blind_navigator/include/nav_config.h
+proxy/.env
+
+# Build artifacts
+.build/
+*.bin
+*.elf
+*.o
+*.a
+*.bak
+__pycache__/
+*.pyc
+
+# IDE / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+flash.log
