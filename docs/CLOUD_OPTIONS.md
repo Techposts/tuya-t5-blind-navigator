@@ -4,47 +4,51 @@ There are three ways to give the board AI vision + speech. This project
 implements **Option B** (local proxy), but the others are valid choices —
 pick whichever fits your priorities.
 
-## Option A — Tuya Cloud AI Multimodal Platform (Tuya's recommended path)
+## Option A — Tuya Cloud AI Multimodal Platform (Tuya's official path)
 
-[TuyaOpen's official architecture](https://github.com/tuya/TuyaOpen) bridges
-the device to the **Tuya Developer Cloud**, which then bridges out to
-multiple AI providers — **ChatGPT, Gemini, Claude, Qwen, DeepSeek, Amazon
-Nova** — through a single integrated layer.
+The [TuyaOpen](https://github.com/tuya/TuyaOpen) SDK pairs the device with
+**Tuya Cloud's low-latency multimodal AI platform** (the official phrase
+from Tuya's README). Through that platform, the device can talk to
+multiple AI providers — **ChatGPT, Gemini, Claude, Qwen, DeepSeek, Doubao,
+Amazon Nova** — through a single integrated layer with drag-and-drop
+agent workflows.
+
+Official references:
+
+- **Source / SDK**: <https://github.com/tuya/TuyaOpen>
+- **Documentation**: <https://tuyaopen.ai/docs/about-tuyaopen>
+- **Pricing**: <https://tuyaopen.ai/pricing> — Tuya advertises a free tier
+  (the TuyaOpen GitHub README displays a "free pricing" badge)
 
 | Feature | What you get |
 |---|---|
-| TLS to cloud | Handled by TuyaOpen — works out of the box (they ship the right ciphers / cert pinning) |
-| AI access | Bundled in the developer platform, multi-model fallback supported |
-| Low-latency speech | Streaming TTS/STT, emotion-driven |
-| Drag-and-drop agent | Build flows on the Tuya developer portal without writing code |
-| Long/short-term memory | Built into the platform |
-| Custom MCP server | Plug your own tools into the agent |
-| Mini-app panels | Companion mobile UI auto-generated |
-| Price | Reportedly has a free tier for development; verify current terms on Tuya's pricing page |
+| TLS to cloud | Handled by TuyaOpen — works out of the box (right ciphers + cert pinning shipped in the platform mbedtls) |
+| AI access | Pair with Tuya Cloud's multimodal AI; ChatGPT / Gemini / Claude / Qwen / DeepSeek / Doubao / Amazon Nova |
+| Drag-and-drop workflows | Build AI agent flows in the Tuya developer portal without writing code |
+| Streaming speech | Low-latency TTS / STT via the platform |
+| Pricing | Free tier available; check the [pricing page](https://tuyaopen.ai/pricing) for current commercial terms |
 
 **Pros**
 
 - Zero TLS pain — Tuya engineered the device-to-cloud transport, so the
   T5's mbedtls quirks aren't your problem.
-- Lowest end-to-end latency in this comparison (Tuya optimizes the
-  whole pipeline).
-- Easiest path to a production device — drag-and-drop AI agent + an
-  auto-generated companion app.
-- Multi-provider — switch between OpenAI / Gemini / Claude without
-  re-flashing.
+- Lowest end-to-end latency — Tuya optimizes the whole pipeline.
+- Easiest path to a production device — drag-and-drop AI agent flows.
+- Multi-provider — switch between OpenAI / Gemini / Claude / Doubao / etc.
+  without re-flashing.
+- Free tier exists for development.
 
 **Cons**
 
 - Vendor lock-in to Tuya Cloud.
-- Less control over the *exact* prompt / model / pricing — the agent
-  layer abstracts those choices.
+- Less direct control over the *exact* prompt / model selection / cost
+  ceiling — the agent layer abstracts those choices.
 - Requires a Tuya developer account + product registration.
 
 **When to pick this**
 
 - Production hardware shipping to real users.
-- You want the fastest path to a working device and don't need to own
-  every layer.
+- You want the fastest path to a working device.
 - You want multi-model flexibility without code changes.
 
 **Why we *skipped* it for this project**
@@ -55,6 +59,11 @@ Nova** — through a single integrated layer.
   routes through a self-hosted server.
 - The TLS issue with direct OpenAI access is a great teaching moment, and
   Tuya Cloud would have hidden it.
+
+> **Note**: this comparison reflects the TuyaOpen README at the time of
+> writing. Tuya updates the platform regularly — refer to the
+> [official docs](https://tuyaopen.ai/docs/about-tuyaopen) for the
+> current feature set.
 
 ## Option B — Local proxy (this project)
 
@@ -112,6 +121,11 @@ platform-bundled PSA mbedtls under
 `platform/T5AI/t5_os/{ap,cp}/components/psa_mbedtls/`, and patching that
 config also did not unblock the handshake.
 
+Note that this is the failure mode for **direct HTTPS to OpenAI**.
+Connecting to **Tuya Cloud** (Option A) does not have this problem because
+the Tuya cloud endpoint uses ciphers the platform mbedtls *does* support
+(they ship for that combination).
+
 **See** [LESSONS_LEARNED.md §1](LESSONS_LEARNED.md) for the full diagnosis
 chain. Could be solvable with a deeper dive into `tuya_tls.c` or by
 swapping in upstream mbedtls; in either case it's significant platform
@@ -132,11 +146,12 @@ work, not an app-level change.
 | Multi-provider | ✅ built-in | swap upstream | – |
 | Vendor lock-in | Tuya | none | none |
 | Best for | production | prototyping | (future) |
-| Cost | Tuya pricing | your own API key | your own API key |
+| Cost | free tier + Tuya pricing | your own API key | your own API key |
 | TLS complexity | hidden | bypassed | blocked |
 
 **Recommendation**
 
-- Building a content piece, learning, prototyping → **Option B**.
-- Building a real product → **Option A**, unless you specifically need
-  the lowest-cost / single-provider control.
+- Building a content piece, learning, prototyping, want to own every
+  layer → **Option B**.
+- Building a real product, want fastest time-to-working,
+  multi-model flexibility, free-tier friendliness → **Option A**.
