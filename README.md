@@ -90,6 +90,14 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full data flow.
 
 ## Quick start
 
+> **Just want to try it on a board?** Download the latest `.bin` from
+> [Releases](https://github.com/Techposts/tuya-t5-blind-navigator/releases)
+> and follow the [Flash a Prebuilt Release](https://github.com/Techposts/tuya-t5-blind-navigator/wiki/Flash-Prebuilt)
+> wiki guide — no toolchain, no build, ~10 minutes.
+>
+> **Want to build from source** (recommended for actual use, since it bakes
+> your Wi-Fi + proxy IP + API key into the firmware):
+
 1. **Clone TuyaOpen** SDK and check out the version this app was developed against:
    ```bash
    git clone https://github.com/tuya/TuyaOpen.git ~/TuyaOpen
@@ -133,6 +141,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full data flow.
 
 ## Documentation
 
+- **[Flash a Prebuilt Release](https://github.com/Techposts/tuya-t5-blind-navigator/wiki/Flash-Prebuilt)** *(wiki)* — end-user binary flashing
 - **[ARCHITECTURE](docs/ARCHITECTURE.md)** — data flow, components, threading
 - **[HARDWARE](docs/HARDWARE.md)** — board pinout, camera, display specs
 - **[BUILD_AND_FLASH](docs/BUILD_AND_FLASH.md)** — toolchain, common gotchas
