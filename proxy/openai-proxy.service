@@ -1,0 +1,15 @@
+[Unit]
+Description=OpenAI Proxy for Tuya T5 Blind Navigator
+After=network-online.target
+
+[Service]
+# Replace USERNAME with the system user that owns the proxy script.
+User=USERNAME
+WorkingDirectory=/home/USERNAME/proxy
+EnvironmentFile=/home/USERNAME/proxy/.env
+ExecStart=/usr/bin/python3 /home/USERNAME/proxy/openai_proxy.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
