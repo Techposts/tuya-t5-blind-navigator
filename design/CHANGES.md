@@ -659,6 +659,60 @@ Three landings in one wave:
 
 ---
 
+## v0.3.1 — Polish + forget-Wi-Fi + AP UX hardening · 2026-05-02
+
+Goal: address every UX gap and bug surfaced by hardware testing on top of v0.3.0. End-to-end Wi-Fi setup flow that anyone — sighted or sight-impaired setup helper — can complete without recompiling firmware. Three checkpoint waves (CP20, CP21, CP22 with letters a-j) shipped under one tag because they were all driven by the same continuous testing loop.
+
+### CP20 — Live AJAX settings + diagnostics + buffer-overflow fix
+
+- **Live AJAX**: drag a slider on `/settings`, fires save 220 ms after release, green toast confirms. No page reload.
+- **`/diagnostics` page**: wake-event counter (proves "Hi Tuya" callback is firing), free heap, IP, uptime, manual NAVIGATE/READ/IDENTIFY trigger buttons.
+- **Volume now actually applies**: `nav_settings_set_volume` calls `ai_audio_player_set_vol(v)` and applies on every save + on every boot.
+- **Buffer-overflow fix**: `route_settings_save` and `route_wifi_save` had small response buffers (1500–2048 bytes) that couldn't hold the 3644-byte HEAD CSS chunk. Fix: stream HEAD/body/FOOT separately via `send_html_page`. Replaces silent ERR_EMPTY_RESPONSE on save with a real 303 redirect that lands the user back on `/settings?saved=1`.
+- **Rich `/api/status` JSON**: `state`, `ip`, `rssi_dbm`, `free_heap_b`, `uptime_epoch`, `wake_count`, `volume`, `brightness`. Polled every 3 s by the new home-page live status panel.
+- **Polished home page**: SVG-icon nav, three large vision-action buttons, live status card auto-refresh.
+
+### CP21 — Forget Wi-Fi (web button + 5-second physical hold)
+
+- New web `/wifi` page card with a red destructive "FORGET WI-FI" button. Confirm dialog + 303 redirect to a dedicated reboot page.
+- Five-second physical button hold triggers the same forget. Detected via `LONG_PRESS_HOLD` event with elapsed-ms tracking.
+- New KV key `wifi.force_ap`: when armed, boot path skips both KV creds and build-time `NAV_SSID_LIST` and goes straight to AP mode. Cleared automatically on next successful save via `nav_wifi_save_kv`.
+
+### CP22 — AP visibility + display UX + button hardening (10 polish iterations)
+
+a–c: AP visibility — defensive `nav_wifi_start_ap` (stop+disconnect+sleep+logs), AP-only mode lockdown (303 redirects from /home/settings/diagnostics → /wifi), simplified /wifi setup wizard.
+
+d–f: AP setup screen on the LCD — force-show `s_state_label` with the SSID, hide conflicting per-state widgets, add a multi-line bottom hint label with two short instructions (`JOIN PHONE Wi-Fi` / `THEN OPEN 192.168.4.1`). After save, the same hint area updates in-place to `SAVED · CONNECTING TO <ssid> · REBOOTING…` instead of a too-small overlay banner.
+
+g–h: button gesture fixes — re-registered `TDL_BUTTON_LONG_PRESS_START` (was dropped accidentally; without it, 5-second holds leak SINGLE_CLICK on release and trigger NAVIGATE instead of forget). Explicit `long_start_valid_time = 1000 ms`, `long_keep_timer = 500 ms`. Defensive SINGLE_CLICK suppression based on actual press duration. Serial logs (`[BTN] DOWN/UP/HOLD ...`) for diagnostic visibility.
+
+i: banner readability — shorter forget text (`FORGET %d%%`, `FORGETTING`, `CANCELLED` instead of overflowing 32-pt-font strings), fully opaque banner background. NTP polling accelerated from 30 s to 5 s so the status-bar clock appears within seconds of NTP sync; `[CLOCK] NTP not synced yet (rt=0xN)` log line surfaces sync failures.
+
+j: dedicated forget overlay — replaces the mode banner for forget messages with a centered modal panel (W-16 wide, 140 px tall, fully opaque black, 2-pixel amber border that turns red at ≥80% progress, real progress bar at the bottom). IDENTIFY mode deferred from `LONG_PRESS_START` (1 s) to `PRESS_UP` only when held was 1000–2500 ms — keeps the underlying screen calm during a 5-second forget hold.
+
+### Display states added
+
+- AP setup: top-left `WI-FI SETUP MODE`, top-right `192.168.4.1`, center `IRIS-XXXX` in amber, bottom hint with 2-line instruction.
+- AP saved (post `/api/wifi/save`): same area flips green + shows `SAVED ✓ / CONNECTING TO <ssid> / REBOOTING…`.
+- Forget gesture (3+ s held): solid centered modal overlay with progress bar.
+- Forget cancelled: gray `CANCELLED` banner.
+
+### Deferred from v0.3.1 → v0.4.0
+
+| Item | Why |
+|---|---|
+| **mDNS hostname `iris.local`** | Needs lwIP rebuild (`LWIP_MDNS_RESPONDER=1`) at platform level |
+| **Captive-portal DNS hijack** | Same lwIP-rebuild dependency |
+| **Wake-word audible feedback** | Toggle is wired but `ai_audio_player_alert` must run off the KWS callback thread (proven by CP12e regression) — needs `tal_workq` deferral wrapper |
+| **LD2450 mmWave radar** | Hardware integration on a separate board iteration |
+
+### Release artifacts
+
+- **Binary**: `iris_v0.3.1_QIO.bin`
+- **SHA256**: `57e7465f4fa9f4e24fd1e8ef655b65c6f8ab78a05d9c48a7130bf34cdc298d92`
+
+---
+
 ## Deferrals (updated 2026-05-02 after CP11b landed)
 
 | Item | Why deferred |

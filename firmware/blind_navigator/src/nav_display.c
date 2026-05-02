@@ -34,6 +34,7 @@ static lv_obj_t *s_iris_inner_dark;  /* dark ring inside iris */
 static lv_obj_t *s_pupil;            /* pupil (small, with glow) */
 static lv_obj_t *s_orbit;            /* one rotating thin arc */
 static lv_obj_t *s_state_label;
+static lv_obj_t *s_ap_hint = NULL;     /* CP22: persistent AP-mode instructions panel, lazily created */
 /* CP8: response panel removed -- output is audio-only via TTS */
 static lv_obj_t *s_wifi_label;
 static lv_obj_t *s_ip_label;
@@ -471,7 +472,9 @@ OPERATE_RET nav_display_init(void) {
     lv_obj_set_size(s_mode_banner, W - 32, 64);
     lv_obj_align(s_mode_banner, LV_ALIGN_TOP_MID, 0, 28);
     lv_obj_set_style_bg_color(s_mode_banner, COL_PANEL, LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(s_mode_banner, LV_OPA_90, LV_PART_MAIN);
+    /* CP22i: full opaque so background widgets don't bleed through and hurt
+     * banner readability. */
+    lv_obj_set_style_bg_opa(s_mode_banner, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_border_color(s_mode_banner, COL_IDLE, LV_PART_MAIN);
     lv_obj_set_style_border_width(s_mode_banner, 1, LV_PART_MAIN);
     lv_obj_set_style_radius(s_mode_banner, 14, LV_PART_MAIN);
@@ -1056,8 +1059,14 @@ static void s_boot_hide_cb(lv_timer_t *t) {
     }
 }
 
+/* CP20: track current state so the web UI can render the live device state
+ * without polling LVGL widget text (which would race with the LVGL thread). */
+static disp_state_t s_current_state = DISP_STATE_IDLE;
+disp_state_t nav_display_get_state(void) { return s_current_state; }
+
 void nav_display_set_state(disp_state_t st) {
     if (!s_inited) return;
+    s_current_state = st;
     lv_color_t c = state_color(st);
     lv_vendor_disp_lock();
     /* CP10c: banner shows for tap-acknowledgement only. As soon as the state
@@ -1358,5 +1367,227 @@ void nav_display_set_time(const char *hhmm) {
     if (!s_inited || !hhmm || !s_clock_label) return;
     lv_vendor_disp_lock();
     lv_label_set_text(s_clock_label, hhmm);
+    lv_vendor_disp_unlock();
+}
+
+/* ============================================================
+ * CP22: AP-mode + forget + wifi-received display feedback
+ *
+ * These are minimal shims that reuse existing widgets (state_label,
+ * ip_label, mode_banner) rather than introduce a new widget tree.
+ * Trade-off: less visual polish than custom LVGL panels, but no risk
+ * of conflicts with existing per-state show/hide logic.
+ * ============================================================ */
+
+/* Persistent screen for "device is in AP setup mode, here's what to type
+ * on your phone". Called once when nav_wifi_start_ap succeeds.
+ *
+ * The earlier version of this function set s_state_label text but the per-state
+ * layout code (nav_display_set_state) hides s_state_label in BOTH idle and
+ * non-idle branches -- so writing to it was invisible. This version forces
+ * the right widgets visible and the wrong widgets hidden so the SSID + URL
+ * are actually readable on the LCD.
+ */
+void nav_display_show_ap_setup(const char *ap_ssid) {
+    if (!s_inited || !ap_ssid) return;
+
+    lv_vendor_disp_lock();
+
+    /* Hide everything that doesn't belong on the AP-setup screen */
+    if (s_mode_hints)    lv_obj_add_flag(s_mode_hints,    LV_OBJ_FLAG_HIDDEN);
+    if (s_idle_tag)      lv_obj_add_flag(s_idle_tag,      LV_OBJ_FLAG_HIDDEN);
+    if (s_idle_cta)      lv_obj_add_flag(s_idle_cta,      LV_OBJ_FLAG_HIDDEN);
+    if (s_layer_capture) lv_obj_add_flag(s_layer_capture, LV_OBJ_FLAG_HIDDEN);
+    if (s_layer_think)   lv_obj_add_flag(s_layer_think,   LV_OBJ_FLAG_HIDDEN);
+    if (s_layer_error)   lv_obj_add_flag(s_layer_error,   LV_OBJ_FLAG_HIDDEN);
+
+    /* Force-show the central state label and write the SSID into it, big + amber */
+    if (s_state_label) {
+        lv_obj_clear_flag(s_state_label, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(s_state_label, ap_ssid);
+        lv_obj_set_style_text_color(s_state_label, COL_LISTENING, LV_PART_MAIN);
+        lv_obj_set_style_text_letter_space(s_state_label, 6, LV_PART_MAIN);
+    }
+
+    /* Show the WI-FI online indicator + IP at top so user knows where to point phone */
+    if (s_wifi_label) {
+        lv_obj_clear_flag(s_wifi_label, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(s_wifi_label, "WI-FI SETUP MODE");
+        lv_obj_set_style_text_color(s_wifi_label, COL_LISTENING, LV_PART_MAIN);
+    }
+    if (s_ip_label) {
+        lv_obj_clear_flag(s_ip_label, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(s_ip_label, "192.168.4.1");
+    }
+
+    lv_vendor_disp_unlock();
+
+    /* CP22d: lazy-create a persistent multi-line instructions panel anchored
+     * at the bottom of the screen. Without this, a user looking at the LCD
+     * sees "IRIS-A1B2" and has no idea what to do with it. With this, anyone
+     * can read the screen and complete the setup. CP22f: hoisted to file scope
+     * so nav_display_show_wifi_received can reuse the same widget for the
+     * "saved · connecting · rebooting" status update. */
+    lv_vendor_disp_lock();
+    if (!s_ap_hint) {
+        s_ap_hint = lv_label_create(s_screen);
+        lv_obj_set_width(s_ap_hint, LV_HOR_RES - 32);
+        lv_label_set_long_mode(s_ap_hint, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_color(s_ap_hint, lv_color_hex(0xC7CFDB), LV_PART_MAIN);
+        lv_obj_set_style_text_font(s_ap_hint, &font_iris_mono_sm_12, LV_PART_MAIN);
+        lv_obj_set_style_text_letter_space(s_ap_hint, 1, LV_PART_MAIN);
+        lv_obj_set_style_text_line_space(s_ap_hint, 5, LV_PART_MAIN);
+        lv_obj_set_style_text_align(s_ap_hint, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_obj_align(s_ap_hint, LV_ALIGN_BOTTOM_MID, 0, -16);
+    }
+    /* CP22e: shrunk from 9 lines to 2 to avoid overlapping the bionic eye
+     * and to read at a glance. SSID is not duplicated here -- it's already
+     * shown prominently as s_state_label above. The "OPEN" arrow points to
+     * the browser URL which is also visible top-right. */
+    (void)ap_ssid;
+    const char *hint =
+        "JOIN PHONE Wi-Fi\n"
+        "THEN OPEN  192.168.4.1";
+    lv_label_set_text(s_ap_hint, hint);
+    lv_obj_clear_flag(s_ap_hint, LV_OBJ_FLAG_HIDDEN);
+    lv_vendor_disp_unlock();
+
+    /* Banner with the URL the user needs to visit -- auto-hides after 700ms,
+     * but the SSID on s_state_label, the IP on s_ip_label, and the bottom
+     * hint panel all remain readable. */
+    nav_display_show_mode_banner("CONNECT PHONE TO IRIS", 0xFFB347);
+}
+
+/* CP22j: dedicated forget overlay -- a fully opaque solid rectangle that
+ * covers a wide centered band of the screen. Replaces the previous mode-
+ * banner approach which suffered from text-overflow + bleed-through from
+ * the eye/SSID/instructions underneath. The rectangle is large enough to
+ * read at arm's length and dominates whatever the device state machine
+ * is doing in the background. Lazily created on first call. */
+static lv_obj_t *s_forget_overlay       = NULL;
+static lv_obj_t *s_forget_overlay_label = NULL;
+static lv_obj_t *s_forget_overlay_bar   = NULL;  /* progress fill bar */
+
+static void ensure_forget_overlay_built(void) {
+    if (s_forget_overlay) return;
+
+    s_forget_overlay = lv_obj_create(s_screen);
+    /* Wide centered band -- screen width minus 16px margin, ~140px tall */
+    lv_obj_set_size(s_forget_overlay, LV_HOR_RES - 16, 140);
+    lv_obj_align(s_forget_overlay, LV_ALIGN_CENTER, 0, 0);
+    /* Solid black rectangle -- no opacity-90 / no shadow bleed-through.
+     * Strong amber border so it reads as a destructive-action panel. */
+    lv_obj_set_style_bg_color(s_forget_overlay, lv_color_hex(0x000000), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_forget_overlay, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(s_forget_overlay, lv_color_hex(0xFFB347), LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_forget_overlay, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_forget_overlay, 12, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_forget_overlay, 16, LV_PART_MAIN);
+    lv_obj_set_style_shadow_opa(s_forget_overlay, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_clear_flag(s_forget_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_forget_overlay, LV_OBJ_FLAG_HIDDEN);
+
+    /* Centered label, big readable font */
+    s_forget_overlay_label = lv_label_create(s_forget_overlay);
+    lv_label_set_text(s_forget_overlay_label, "FORGET WI-FI");
+    lv_obj_set_style_text_color(s_forget_overlay_label, lv_color_hex(0xFFB347), LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_forget_overlay_label, &font_iris_title_32, LV_PART_MAIN);
+    lv_obj_set_style_text_letter_space(s_forget_overlay_label, 4, LV_PART_MAIN);
+    lv_obj_align(s_forget_overlay_label, LV_ALIGN_TOP_MID, 0, 8);
+
+    /* Progress bar track + fill */
+    lv_obj_t *track = lv_obj_create(s_forget_overlay);
+    lv_obj_set_size(track, LV_HOR_RES - 64, 10);
+    lv_obj_align(track, LV_ALIGN_BOTTOM_MID, 0, -16);
+    lv_obj_set_style_bg_color(track, lv_color_hex(0x1C2430), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(track, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(track, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(track, 5, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(track, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(track, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_forget_overlay_bar = lv_obj_create(track);
+    lv_obj_set_size(s_forget_overlay_bar, 0, 10);
+    lv_obj_align(s_forget_overlay_bar, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_bg_color(s_forget_overlay_bar, lv_color_hex(0xFFB347), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_forget_overlay_bar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_forget_overlay_bar, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_forget_overlay_bar, 5, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_forget_overlay_bar, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(s_forget_overlay_bar, LV_OBJ_FLAG_SCROLLABLE);
+}
+
+void nav_display_show_forget_progress(int pct) {
+    if (!s_inited) return;
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    lv_vendor_disp_lock();
+    ensure_forget_overlay_built();
+    /* Update text + bar fill + accent color (amber → red as it nears 100%) */
+    if (s_forget_overlay_label) {
+        if (pct >= 100) {
+            lv_label_set_text(s_forget_overlay_label, "FORGETTING");
+        } else {
+            lv_label_set_text(s_forget_overlay_label, "FORGET WI-FI");
+        }
+        uint32_t accent = (pct >= 80) ? 0xFF6B6B : 0xFFB347;
+        lv_obj_set_style_text_color(s_forget_overlay_label, lv_color_hex(accent), LV_PART_MAIN);
+        lv_obj_set_style_border_color(s_forget_overlay, lv_color_hex(accent), LV_PART_MAIN);
+        if (s_forget_overlay_bar) {
+            int track_w = LV_HOR_RES - 64;
+            int fill_w  = (track_w * pct) / 100;
+            lv_obj_set_size(s_forget_overlay_bar, fill_w, 10);
+            lv_obj_set_style_bg_color(s_forget_overlay_bar, lv_color_hex(accent), LV_PART_MAIN);
+        }
+    }
+    lv_obj_clear_flag(s_forget_overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_forget_overlay);
+    lv_vendor_disp_unlock();
+}
+
+void nav_display_hide_forget_overlay(void) {
+    if (!s_inited || !s_forget_overlay) return;
+    lv_vendor_disp_lock();
+    lv_obj_add_flag(s_forget_overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_vendor_disp_unlock();
+}
+
+/* CP22f: When the AP web UI saves new credentials, update the bottom hint
+ * panel in-place to show "SAVED · CONNECTING TO <ssid> · REBOOTING..." so
+ * the user gets a coherent state-progression in the same physical screen
+ * area where they were just reading instructions. The earlier mode-banner
+ * approach auto-sized to the SSID text and could overflow the screen for
+ * long names like "TopFloor 2.4GHZ" + auto-hid in 700ms (so the user saw
+ * a flash, not a status). */
+void nav_display_show_wifi_received(const char *ssid) {
+    if (!s_inited) return;
+
+    /* Build the success message. The hint label uses LV_LABEL_LONG_WRAP and
+     * a fixed width, so even very long SSIDs render cleanly inside it. */
+    char text[160];
+    snprintf(text, sizeof(text),
+        "SAVED \xe2\x9c\x93\n"
+        "CONNECTING TO\n"
+        "%s\n"
+        "REBOOTING...",
+        ssid ? ssid : "");
+
+    lv_vendor_disp_lock();
+    if (s_ap_hint) {
+        lv_label_set_text(s_ap_hint, text);
+        lv_obj_set_style_text_color(s_ap_hint, lv_color_hex(0x4ADE80), LV_PART_MAIN);
+        lv_obj_clear_flag(s_ap_hint, LV_OBJ_FLAG_HIDDEN);
+    }
+    /* Recolor the SSID label green too -- subtle confirmation that the
+     * save was accepted. */
+    if (s_state_label) {
+        lv_obj_set_style_text_color(s_state_label, lv_color_hex(0x4ADE80), LV_PART_MAIN);
+    }
+    /* Update the top-left status hint as well so every readable area on
+     * the screen now agrees about what's happening. */
+    if (s_wifi_label) {
+        lv_label_set_text(s_wifi_label, "SAVED");
+        lv_obj_set_style_text_color(s_wifi_label, lv_color_hex(0x4ADE80), LV_PART_MAIN);
+    }
     lv_vendor_disp_unlock();
 }
