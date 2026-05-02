@@ -19,24 +19,26 @@ The device is a **navigation co-pilot**, not a tour guide — every response is 
 
 ---
 
-## What v0.3.0 ships
+## What v0.3.1 ships
 
-Everything from v0.2.0 (retina-scanner UI, structured response, 3 vision modes, double-tap repeat, custom typography) **plus**:
+Everything from v0.3.0 plus a polish wave that addresses every UX gap surfaced by hardware testing:
 
 | Feature | Status |
 |---|---|
 | **Wi-Fi setup without rebuild** — boot to `IRIS-XXXX` AP, browser to `192.168.4.1`, pick network, save | ✅ v0.3.0 |
-| **Embedded web UI** at device IP — Wi-Fi / Settings / Diagnostics pages, IRIS-themed (Space Grotesk + JBM, deep obsidian) | ✅ v0.3.0 |
-| **Live brightness control** — `/settings` slider applies immediately to LCD backlight; persists across reboots | ✅ v0.3.0 |
-| **Settings persistence** — volume, brightness, voice, language, wake-feedback toggle stored in LittleFS KV | ✅ v0.3.0 |
-| **NTP status-bar clock** — `HH:MM` top-right, updates every 30 s once Wi-Fi is up | ✅ v0.3.0 |
+| **AP-mode UX** — locked single-page setup wizard, LCD shows SSID + step-by-step instructions, save → green confirmation flash → reboots cleanly | ✅ v0.3.1 |
+| **Forget Wi-Fi** — destructive button on `/wifi` page **+** 5-second physical button hold with on-screen progress bar overlay | ✅ v0.3.1 |
+| **Live AJAX settings** — slider/select changes save instantly with toast, no page reload | ✅ v0.3.1 |
+| **Live home dashboard** — auto-refreshing status (state, IP, signal, heap, wake count) + three large icon buttons for NAVIGATE / READ TEXT / IDENTIFY | ✅ v0.3.1 |
+| **Brightness + volume** apply live to hardware via `tdl_disp_set_brightness` and `ai_audio_player_set_vol`; persist across reboots | ✅ v0.3.0 / 0.3.1 |
+| **NTP status-bar clock** — appears within 5 s of NTP sync (down from 30 s in 0.3.0) | ✅ v0.3.1 |
 | **"Hi Tuya" wake word** — Wanson KWS engine wired, fires NAVIGATE on detect | ✅ v0.3.0 |
-| **Diagnostics page** — wake-event counter, free heap, manual NAVIGATE/READ trigger buttons | ✅ v0.3.0 |
+| **Diagnostics page** — wake-event counter, free heap, manual NAVIGATE/READ/IDENTIFY trigger buttons | ✅ v0.3.0 |
 | **mDNS hostname (`iris.local`)** | 🔜 v0.4.0 (needs lwIP rebuild) |
 | **Wake-word audible feedback** | 🔜 v0.4.0 (needs `tal_workq` deferral so KWS thread isn't blocked) |
 | **LD2450 mmWave sensor** for real DEPTH/HAZARDS data | 🔜 v0.4.0 |
 
-See [`design/CHANGES.md`](design/CHANGES.md) for the full per-checkpoint changelog from v0.1.0 → v0.3.0.
+See [`design/CHANGES.md`](design/CHANGES.md) for the full per-checkpoint changelog from v0.1.0 → v0.3.1.
 
 ---
 
