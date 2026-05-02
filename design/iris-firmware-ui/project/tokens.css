@@ -1,0 +1,182 @@
+/* =========================================================
+   IRIS-OS Design Tokens — for LVGL v9 firmware
+   3.5" TFT LCD · 320×480 portrait · single-touch
+   ========================================================= */
+
+:root {
+  /* ---- Surfaces ---- */
+  --bg-0:        #05070A;   /* deep obsidian — true canvas */
+  --bg-1:        #0A0E14;   /* card / overlay base */
+  --bg-2:        #131923;   /* raised surface */
+  --bg-line:     #1C2430;   /* hairline divider */
+
+  /* ---- Text ---- */
+  --fg-0:        #F4F6FA;   /* pure-white-ish, tuned warm */
+  --fg-1:        #C7CFDB;   /* secondary */
+  --fg-2:        #7A8696;   /* tertiary / mono labels */
+  --fg-3:        #4A5363;   /* placeholder */
+
+  /* ---- State colors (pupil + ring glow) ---- */
+  --state-idle:        #4FE3F0;   /* cyan      */
+  --state-capture:     #FFB347;   /* amber     */
+  --state-think:       #E879F9;   /* magenta   */
+  --state-speak:       #4ADE80;   /* green     */
+  --state-error:       #FF5C5C;   /* red       */
+
+  /* ---- Typography ---- */
+  --font-display: "Space Grotesk", "Inter", system-ui, sans-serif;
+  --font-mono:    "JetBrains Mono", "SF Mono", ui-monospace, monospace;
+
+  /* ---- Type scale (px on 320×480 device) ---- */
+  --t-mono-xs:  10px;   /* tags, mode pills */
+  --t-mono-sm:  12px;   /* technical labels */
+  --t-body:     16px;   /* secondary copy */
+  --t-status:   24px;   /* MIN status size */
+  --t-title:    32px;   /* primary status */
+  --t-hero:     44px;   /* speak: big lines */
+
+  /* ---- Radii ---- */
+  --r-pill:  999px;
+  --r-card:  14px;
+  --r-tag:   6px;
+
+  /* ---- Spacing scale ---- */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-8: 32px;
+}
+
+/* ---- Reset for device frames ---- */
+.screen {
+  width: 320px;
+  height: 480px;
+  background: var(--bg-0);
+  color: var(--fg-0);
+  font-family: var(--font-display);
+  position: relative;
+  overflow: hidden;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scanline + LCD-grain overlay (cinematic 4K close-up) */
+.screen::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(
+      0deg,
+      rgba(255,255,255,0.012) 0px,
+      rgba(255,255,255,0.012) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+  mix-blend-mode: overlay;
+  z-index: 50;
+}
+
+/* Subtle vignette to feel like a real LCD */
+.screen::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(
+    ellipse at center,
+    transparent 55%,
+    rgba(0,0,0,0.55) 100%
+  );
+  z-index: 49;
+}
+
+/* ---- Status bar (top of every screen) ---- */
+.statusbar {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  font-family: var(--font-mono);
+  font-size: var(--t-mono-xs);
+  letter-spacing: 0.08em;
+  color: var(--fg-2);
+  z-index: 10;
+}
+.statusbar .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--state-idle);
+  box-shadow: 0 0 6px currentColor;
+  display: inline-block;
+  margin-right: 6px;
+  vertical-align: 1px;
+}
+
+/* ---- Mono utility ---- */
+.mono { font-family: var(--font-mono); letter-spacing: 0.06em; }
+.upper { text-transform: uppercase; }
+
+/* ---- Animations ---- */
+@keyframes spin-cw  { to { transform: rotate(360deg); } }
+@keyframes spin-ccw { to { transform: rotate(-360deg); } }
+
+@keyframes pupil-pulse {
+  0%, 100% { transform: scale(1);    opacity: 1;   }
+  50%      { transform: scale(1.08); opacity: 0.85;}
+}
+
+@keyframes pupil-think {
+  0%, 100% { transform: scale(0.92); }
+  50%      { transform: scale(1.15); }
+}
+
+@keyframes glow-breathe {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1;    }
+}
+
+@keyframes audio-bar {
+  0%,100% { transform: scaleY(0.25); }
+  50%     { transform: scaleY(1);    }
+}
+
+@keyframes shutter-flash {
+  0%   { opacity: 0; }
+  20%  { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+@keyframes scan-line {
+  0%   { transform: translateY(-100%); }
+  100% { transform: translateY(2400%); }
+}
+
+@keyframes type-in {
+  0%   { clip-path: inset(0 100% 0 0); }
+  100% { clip-path: inset(0 0    0 0); }
+}
+
+@keyframes error-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255,92,92,0.5); }
+  50%      { box-shadow: 0 0 0 8px rgba(255,92,92,0); }
+}
+
+@keyframes banner-slide {
+  0%   { transform: translateY(-100%); opacity: 0; }
+  20%  { transform: translateY(0);     opacity: 1; }
+  80%  { transform: translateY(0);     opacity: 1; }
+  100% { transform: translateY(-100%); opacity: 0; }
+}
+
+@keyframes boot-iris {
+  0%   { transform: scale(0.2); opacity: 0; }
+  60%  { transform: scale(1.1); opacity: 1; }
+  100% { transform: scale(1);   opacity: 1; }
+}

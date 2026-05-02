@@ -75,40 +75,69 @@ OPERATE_RET openai_ask_audio(const uint8_t *wav, uint32_t len, char **out) { ret
 
 OPERATE_RET openai_ask_image(const uint8_t *jpeg, uint32_t len, const char *prompt, char **out) {
     *out = NULL;
+    if (!jpeg || !prompt) return OPRT_INVALID_PARM;
+
     char *b64 = base64_encode_alloc(jpeg, len);
     if (!b64) return OPRT_MALLOC_FAILED;
-    size_t blen = strlen(b64) + 1024;
-    char *body = (char *)tal_psram_malloc(blen);
-    if (!body) { tal_psram_free(b64); return OPRT_MALLOC_FAILED; }
-    snprintf(body, blen,
-        "{\"model\":\"gpt-4o-mini\","
-        "\"messages\":[{\"role\":\"user\",\"content\":["
-        "{\"type\":\"text\",\"text\":\"%s\"},"
-        "{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/jpeg;base64,%s\"}}"
-        "]}],\"max_tokens\":120}",
-        prompt, b64);
+
+    /* Build the data URI: "data:image/jpeg;base64,<b64>" */
+    size_t uri_len = strlen("data:image/jpeg;base64,") + strlen(b64) + 1;
+    char *data_uri = (char *)tal_psram_malloc(uri_len);
+    if (!data_uri) { tal_psram_free(b64); return OPRT_MALLOC_FAILED; }
+    snprintf(data_uri, uri_len, "data:image/jpeg;base64,%s", b64);
     tal_psram_free(b64);
 
+    /* Build body via cJSON so prompt + URI are properly JSON-escaped */
+    cJSON *root = cJSON_CreateObject();
+    if (!root) { tal_psram_free(data_uri); return OPRT_MALLOC_FAILED; }
+    cJSON_AddStringToObject(root, "model", "gpt-4o-mini");
+    cJSON *messages = cJSON_AddArrayToObject(root, "messages");
+    cJSON *msg = cJSON_CreateObject();
+    cJSON_AddStringToObject(msg, "role", "user");
+    cJSON *content = cJSON_AddArrayToObject(msg, "content");
+    cJSON *text_part = cJSON_CreateObject();
+    cJSON_AddStringToObject(text_part, "type", "text");
+    cJSON_AddStringToObject(text_part, "text", prompt);
+    cJSON_AddItemToArray(content, text_part);
+    cJSON *img_part = cJSON_CreateObject();
+    cJSON_AddStringToObject(img_part, "type", "image_url");
+    cJSON *img_url = cJSON_AddObjectToObject(img_part, "image_url");
+    cJSON_AddStringToObject(img_url, "url", data_uri);
+    cJSON_AddItemToArray(content, img_part);
+    cJSON_AddItemToArray(messages, msg);
+    cJSON_AddNumberToObject(root, "max_tokens", 120);
+
+    char *body = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    tal_psram_free(data_uri);
+    if (!body) return OPRT_MALLOC_FAILED;
+
     uint8_t *rbuf = (uint8_t *)tal_psram_malloc(RESP_BUF_SIZE);
-    if (!rbuf) { tal_psram_free(body); return OPRT_MALLOC_FAILED; }
+    if (!rbuf) { cJSON_free(body); return OPRT_MALLOC_FAILED; }
     const uint8_t *rbody = NULL; size_t rlen = 0;
     int res = openai_post_json("/v1/chat/completions", body, rbuf, RESP_BUF_SIZE, &rbody, &rlen);
     if (res == 0 && rbody && rlen > 0) {
         ((char *)rbuf)[(rlen < RESP_BUF_SIZE) ? rlen : RESP_BUF_SIZE - 1] = 0;
         *out = extract_chat_text((const char *)rbody);
     }
-    tal_psram_free(body);
+    cJSON_free(body);
     tal_psram_free(rbuf);
     return (*out) ? OPRT_OK : OPRT_COM_ERROR;
 }
 
 OPERATE_RET openai_tts(const char *text, uint8_t **out, uint32_t *out_len) {
     *out = NULL;
-    char body[640];
-    snprintf(body, sizeof(body),
-        "{\"model\":\"gpt-4o-mini-tts\",\"input\":\"%s\","
-        "\"voice\":\"alloy\",\"response_format\":\"wav\"}",
-        text);
+    if (!text) return OPRT_INVALID_PARM;
+    /* Build body via cJSON so input text is properly JSON-escaped (quotes, backslashes, newlines) */
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return OPRT_MALLOC_FAILED;
+    cJSON_AddStringToObject(root, "model", "gpt-4o-mini-tts");
+    cJSON_AddStringToObject(root, "input", text);
+    cJSON_AddStringToObject(root, "voice", "alloy");
+    cJSON_AddStringToObject(root, "response_format", "wav");
+    char *body = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!body) return OPRT_MALLOC_FAILED;
     uint8_t *rbuf = (uint8_t *)tal_psram_malloc(RESP_BUF_SIZE);
     if (!rbuf) return OPRT_MALLOC_FAILED;
     const uint8_t *rbody = NULL; size_t rlen = 0;

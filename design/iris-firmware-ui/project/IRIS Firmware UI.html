@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>IRIS — Vision Co-Pilot · Firmware UI</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="tokens.css" />
+
+<style>
+  body {
+    margin: 0;
+    background: #07090C;
+    color: #F4F6FA;
+    font-family: "Space Grotesk", system-ui, sans-serif;
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="eye.jsx"></script>
+<script type="text/babel" src="screens.jsx"></script>
+<script type="text/babel" src="specs.jsx"></script>
+
+<script type="text/babel">
+const {
+  ScreenBoot, ScreenIdle, ScreenCapturing, ScreenThinking,
+  ScreenSpeaking, ScreenModeBanner, ScreenError, ScreenSettings,
+} = window.IRIS;
+const { TouchZoneSpec, AnimationSpec, TokenSpec, RecommendationSpec } = window.IRIS_SPECS;
+
+function App() {
+  return (
+    <DesignCanvas
+      title="IRIS — Firmware UI · 320×480"
+      subtitle="3.5″ TFT LCD · LVGL v9 · single-touch + 1 button"
+    >
+      <DCSection id="screens" title="01 · The 8 screens">
+        <DCArtboard id="boot"     label="① Boot · 2s splash"        width={320} height={480}>
+          <ScreenBoot />
+        </DCArtboard>
+        <DCArtboard id="idle"     label="② Idle ready · default home" width={320} height={480}>
+          <ScreenIdle />
+        </DCArtboard>
+        <DCArtboard id="capture"  label="③ Capturing · 200ms shutter" width={320} height={480}>
+          <ScreenCapturing />
+        </DCArtboard>
+        <DCArtboard id="think"    label="④ Thinking · 3–8s"           width={320} height={480}>
+          <ScreenThinking />
+        </DCArtboard>
+        <DCArtboard id="speak"    label="⑤ Speaking · response"        width={320} height={480}>
+          <ScreenSpeaking />
+        </DCArtboard>
+        <DCArtboard id="banner"   label="⑥ Mode-switch banner"         width={320} height={480}>
+          <ScreenModeBanner />
+        </DCArtboard>
+        <DCArtboard id="error"    label="⑦ Error · no image"           width={320} height={480}>
+          <ScreenError />
+        </DCArtboard>
+        <DCArtboard id="settings" label="⑧ Settings overlay"           width={320} height={480}>
+          <ScreenSettings />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="motion" title="02 · Motion + transition spec">
+        <DCArtboard id="anim" label="Bionic-eye timing matrix" width={920} height={600}>
+          <AnimationSpec />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="touch" title="03 · Touch zones · idle screen">
+        <DCArtboard id="zones" label="Gesture map · idle home" width={720} height={600}>
+          <TouchZoneSpec />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="tokens" title="04 · Color + type tokens">
+        <DCArtboard id="tok" label="LVGL-ready palette + scale" width={920} height={600}>
+          <TokenSpec />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="reco" title="05 · Cinematic recommendation">
+        <DCArtboard id="reco-card" label="One opinionated upgrade" width={720} height={600}>
+          <RecommendationSpec />
+        </DCArtboard>
+      </DCSection>
+    </DesignCanvas>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

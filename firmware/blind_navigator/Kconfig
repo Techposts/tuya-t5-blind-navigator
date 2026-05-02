@@ -1,0 +1,5 @@
+menu "configure app (blind_navigator) "
+
+rsource "../ai_components/Kconfig"
+
+endmenu
