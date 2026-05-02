@@ -2,7 +2,7 @@
 
 Single source of truth for what's done, what's next, and what's parked. Updated alongside major releases.
 
-**Current release**: `v0.2.0` (2026-05-02)
+**Current release**: `v0.3.0` (2026-05-02) — setup-without-rebuild + diagnostics + brightness control
 
 ---
 
@@ -30,32 +30,25 @@ Full per-checkpoint detail in [design/CHANGES.md](../design/CHANGES.md).
 
 ---
 
-## Phase 2 — Setup-without-rebuild (target v0.3.0)
+## Phase 2 — Setup-without-rebuild — DONE in v0.3.0 ✅
 
-The biggest usability gap in v0.2.0: Wi-Fi credentials are baked at build time. Anyone who wants to use the device on their own network has to recompile.
+| Goal | Status |
+|---|---|
+| AP-mode fallback when no known Wi-Fi found | ✅ `IRIS-XXXX` open AP on `192.168.4.1`, station-mode tries KV creds first |
+| Web UI for Wi-Fi setup | ✅ `/wifi` route — live scan, select, password, save → reboot |
+| Web UI for runtime settings | ✅ `/settings` — volume, brightness (live-applied), voice, language, wake-feedback toggle |
+| Time display in status bar | ✅ NTP via `tal_time_service`, `HH:MM` top-right, refreshes every 30 s |
+| Web UI styled to match device | ✅ Space Grotesk + JBM, IRIS color tokens, deep obsidian background, ring buttons. Fonts from Google Fonts CDN |
+| Diagnostics page | ✅ `/diagnostics` — wake counter, free heap, uptime, manual NAVIGATE/READ trigger buttons |
+| Wake-word integration ("Hi Tuya") | ✅ Wanson KWS engine wired via `tkl_kws_reg_wakeup_cb`, fires `touch_tap_trigger` on detect |
 
-### Goals
+### Deferred from Phase 2 → v0.4.0
 
-1. **AP-mode by default when no known Wi-Fi found** — board starts as `IRIS Setup` open AP
-2. **Captive portal** at `http://192.168.4.1` — auto-redirects any URL
-3. **Web UI for Wi-Fi setup** — list nearby networks, pick + enter password, save to LittleFS KV
-4. **Web UI for runtime settings** — volume, brightness, language, voice (matching the Settings overlay screen built in CP9)
-5. **mDNS hostname `iris.local`** — easy address after Wi-Fi connect
-6. **Time display in status bar** — pull NTP after Wi-Fi up, render `14:22` top-right
-7. **Web UI styled to match device** — same Space Grotesk + JetBrains Mono typography, same color tokens, same visual language. CSS-loaded from the device's own LittleFS, no external CDN
-
-### Approach
-
-| Step | Component | Detail |
-|---|---|---|
-| 1 | TuyaOpen `tal_wifi_set_work_mode(WWM_SOFTAP)` | Bring up AP when station-mode times out |
-| 2 | Embedded HTTP server | `tuya_cloud_service` already has one (used by Tuya provisioning); reuse |
-| 3 | LittleFS KV | `tal_kv_*` API to persist Wi-Fi creds, volume, brightness, language, voice |
-| 4 | Web UI assets | Build a small Vite/Vanilla-JS bundle, embed as compressed C arrays via `xxd -i` |
-| 5 | mDNS responder | TuyaOpen has one; just enable + name `iris` |
-| 6 | NTP via `tal_time_service` | Already initialized; just expose hours/minutes to display |
-
-Estimated effort: **3-5 dev days**. Lots of small pieces, each individually small.
+| Item | Reason |
+|---|---|
+| **mDNS hostname `iris.local`** | TuyaOpen's lwIP build does not have `LWIP_MDNS_RESPONDER=1` by default; enabling requires a platform-level rebuild |
+| **Captive-portal DNS hijack** | Same lwIP-rebuild dependency as mDNS |
+| **Wake-word audible feedback play** | KV toggle wired, but `ai_audio_player_alert` must run off the KWS callback thread (CP12e regression proved blocking the KWS thread misses subsequent detections). Needs a `tal_workq`-based deferral wrapper |
 
 ---
 
@@ -121,8 +114,10 @@ The full-product picture:
 
 ---
 
-## Status as of 2026-05-02
+## Status as of 2026-05-02 (post-v0.3.0)
 
-We're in **post-CP11b polish-complete state** for v0.2.0. The next session focus is **Phase 2** (AP-mode + web UI + time display) which gives the device its core "anyone can use it" usability layer. After Phase 2 ships as v0.3.0, sensor integration becomes the v0.4.0 priority.
+**v0.3.0 shipped.** Anyone with the binary can now flash, power on, connect to the `IRIS-XXXX` AP, set Wi-Fi via web UI, then reach the device on its station IP for ongoing settings + diagnostics. No recompile required.
 
-The 180-day no-delete clause on the partnership video means v0.2.0 source must remain available and buildable for at least 6 months. That's why we tag now and treat v0.2.0 as the stable demo baseline.
+Next session focus is **v0.4.0**: lwIP mDNS rebuild (so `iris.local` works), `tal_workq`-deferred audible wake feedback, then sensor stack (LD2450 mmWave + LRA haptic) which becomes the on-device differentiator vs cloud-only assistants.
+
+The 180-day no-delete clause on the partnership video means v0.2.0 source must remain available and buildable through 2026-10-29. v0.3.0 is additive on top of that baseline.

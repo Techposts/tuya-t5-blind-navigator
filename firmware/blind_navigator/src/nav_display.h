@@ -35,6 +35,9 @@ void nav_display_hide_settings(void);
 
 /* CP10: structured 4-field response for the SPEAKING screen.
  * Pass empty strings for unused slots. Field 3 (index 2) is the BIG GREEN hero. */
+/* CP16: status bar clock (HH:MM, 24h) */
+void nav_display_set_time(const char *hhmm);
+
 void nav_display_set_speak_response(
     const char *l1, const char *v1,
     const char *l2, const char *v2,

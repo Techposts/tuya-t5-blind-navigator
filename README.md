@@ -19,26 +19,24 @@ The device is a **navigation co-pilot**, not a tour guide — every response is 
 
 ---
 
-## What v0.2.0 ships
+## What v0.3.0 ships
+
+Everything from v0.2.0 (retina-scanner UI, structured response, 3 vision modes, double-tap repeat, custom typography) **plus**:
 
 | Feature | Status |
 |---|---|
-| Bionic-eye **retina-scanner UI** with 24 tick marks + breathing white pupil + 3 rotating arcs | ✅ |
-| **Boot splash** with eye visible underneath, IRIS title + version, hairline progress | ✅ |
-| **Per-state screens** — Idle / Capturing / Thinking / Speaking / Error / Settings (8 total) | ✅ |
-| **Custom typography** — Space Grotesk + JetBrains Mono baked LVGL bitmap fonts (4bpp antialiased) | ✅ |
-| **Structured response display** — 4 fields with big-green ACTION line, dynamic vertical layout | ✅ |
-| **3 vision modes** — NAVIGATE (tap), READ (swipe down), IDENTIFY (swipe up) | ✅ |
-| **Double-tap to repeat** — replays last response from cache (no LLM call) | ✅ |
-| **Touch gestures** — manual press/release detection (LVGL's gesture system unreliable on GT1151QM) | ✅ |
-| **Mode banner** — brief acknowledgement on every input | ✅ |
-| **Wi-Fi auto-connect** — hardcoded SSID list, baked at build time | ⚠️ Pending captive-portal AP-mode setup in v0.3.0 |
-| **Captive portal AP-mode** — connect to "IRIS Setup" Wi-Fi, configure via web UI | 🔜 v0.3.0 |
-| **Web UI for settings** + mDNS hostname (`iris.local`) | 🔜 v0.3.0 |
-| **Hi Tuya wake word** + follow-up listening window | 🔜 v0.3.0 |
-| **LD2450 mmWave sensor** for real DEPTH/HAZARDS data | 🔜 v0.3.0 |
+| **Wi-Fi setup without rebuild** — boot to `IRIS-XXXX` AP, browser to `192.168.4.1`, pick network, save | ✅ v0.3.0 |
+| **Embedded web UI** at device IP — Wi-Fi / Settings / Diagnostics pages, IRIS-themed (Space Grotesk + JBM, deep obsidian) | ✅ v0.3.0 |
+| **Live brightness control** — `/settings` slider applies immediately to LCD backlight; persists across reboots | ✅ v0.3.0 |
+| **Settings persistence** — volume, brightness, voice, language, wake-feedback toggle stored in LittleFS KV | ✅ v0.3.0 |
+| **NTP status-bar clock** — `HH:MM` top-right, updates every 30 s once Wi-Fi is up | ✅ v0.3.0 |
+| **"Hi Tuya" wake word** — Wanson KWS engine wired, fires NAVIGATE on detect | ✅ v0.3.0 |
+| **Diagnostics page** — wake-event counter, free heap, manual NAVIGATE/READ trigger buttons | ✅ v0.3.0 |
+| **mDNS hostname (`iris.local`)** | 🔜 v0.4.0 (needs lwIP rebuild) |
+| **Wake-word audible feedback** | 🔜 v0.4.0 (needs `tal_workq` deferral so KWS thread isn't blocked) |
+| **LD2450 mmWave sensor** for real DEPTH/HAZARDS data | 🔜 v0.4.0 |
 
-See [`design/CHANGES.md`](design/CHANGES.md) for the full per-checkpoint changelog from v0.1.0 → v0.2.0.
+See [`design/CHANGES.md`](design/CHANGES.md) for the full per-checkpoint changelog from v0.1.0 → v0.3.0.
 
 ---
 
@@ -107,7 +105,7 @@ Run a tiny Flask/FastAPI server on your home network. Board → plain HTTP → p
    #   - Add `#define IRIS_CONFIG_FILLED_IN` near the top to silence the build warning
    ```
 
-   ⚠️ **Wi-Fi is hardcoded at build time in v0.2.0.** Captive-portal AP-mode setup (no rebuild required) is on the v0.3.0 roadmap. For v0.2.0, every Wi-Fi network change = rebuild + reflash. We chose to ship anyway because the partnership recording is fixed at this firmware revision.
+   ℹ️ **Easier path in v0.3.0+:** flash the prebuilt binary, boot the device, connect your phone to the `IRIS-XXXX` open Wi-Fi network the device exposes, then visit `http://192.168.4.1` to set your real Wi-Fi via the web UI. You only need the steps above if you want to bake credentials at compile time.
 
 4. **Run the proxy** on a machine on the same Wi-Fi as the board:
    ```bash

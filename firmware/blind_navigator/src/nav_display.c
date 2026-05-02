@@ -37,6 +37,7 @@ static lv_obj_t *s_state_label;
 /* CP8: response panel removed -- output is audio-only via TTS */
 static lv_obj_t *s_wifi_label;
 static lv_obj_t *s_ip_label;
+static lv_obj_t *s_clock_label;  /* CP16: HH:MM in status bar */
 static lv_anim_t s_orbit_anim;
 static lv_obj_t *s_arc_mid;     /* IRIS Cp2: CCW mid arc */
 static lv_obj_t *s_arc_inner;   /* IRIS Cp2: CW inner arc */
@@ -172,7 +173,15 @@ OPERATE_RET nav_display_init(void) {
     lv_label_set_text(s_ip_label, "");
     lv_obj_set_style_text_color(s_ip_label, COL_DIM, LV_PART_MAIN);
     lv_obj_set_style_text_font(s_ip_label, &font_iris_mono_xs_10, LV_PART_MAIN);
-    lv_obj_align(s_ip_label, LV_ALIGN_TOP_RIGHT, -8, 6);
+    lv_obj_align(s_ip_label, LV_ALIGN_TOP_RIGHT, -8, 18);  /* CP16: shift down to make room for clock */
+
+    /* CP16: HH:MM clock at top-right (above IP). Updates every 30s via lv_timer. */
+    s_clock_label = lv_label_create(s_screen);
+    lv_label_set_text(s_clock_label, "--:--");
+    lv_obj_set_style_text_color(s_clock_label, lv_color_hex(0xC7CFDB), LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_clock_label, &font_iris_mono_sm_12, LV_PART_MAIN);
+    lv_obj_set_style_text_letter_space(s_clock_label, 1, LV_PART_MAIN);
+    lv_obj_align(s_clock_label, LV_ALIGN_TOP_RIGHT, -8, 4);
 
     /* IRIS Cp6: idle CTA stack — small mono tag + big text, both above the eye */
     s_idle_tag = lv_label_create(s_screen);
@@ -1341,5 +1350,13 @@ void nav_display_set_speak_response(
         /* Advance the running Y past this field */
         y = vy + vh + between_fields_gap;
     }
+    lv_vendor_disp_unlock();
+}
+
+/* CP16: HH:MM clock setter, called by main.c's clock-update timer. */
+void nav_display_set_time(const char *hhmm) {
+    if (!s_inited || !hhmm || !s_clock_label) return;
+    lv_vendor_disp_lock();
+    lv_label_set_text(s_clock_label, hhmm);
     lv_vendor_disp_unlock();
 }

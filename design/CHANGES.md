@@ -566,6 +566,99 @@ After CP11/CP11b verification on hardware, this was tagged as the partnership-re
 
 ---
 
+## v0.3.0 — Setup-without-rebuild + diagnostics · 2026-05-02
+
+Goal: kill the "edit C and recompile to change Wi-Fi" friction. Anyone with the binary should be able to set up the device on their own network using only a phone or laptop browser.
+
+### CP12 — Wake-word integration · "Hi Tuya" reaches the app
+
+Re-enabled the Wanson KWS engine via Kconfig:
+
+```
+CONFIG_ENABLE_AI_LANGUAGE_ENGLISH=y
+CONFIG_ENABLE_COMP_AI_AUDIO=y
+CONFIG_ENABLE_COMP_AI_MODE_WAKEUP=y
+CONFIG_ENABLE_WAKEUP=y
+CONFIG_ENABLE_AI_PLAYER=y
+CONFIG_AI_PLAYER_ALERT_SOURCE_LOCAL=y
+```
+
+Registered a callback via `tkl_kws_reg_wakeup_cb(wake_word_cb)`. The callback is intentionally minimal — `s_wake_count++; touch_tap_trigger();` — because earlier attempts that played an audible alert + slept 700 ms blocked the KWS thread and missed subsequent wake events. Audible-feedback policy is now exposed as a KV setting (CP17) and surfaced in the web Settings page.
+
+Serial-log evidence the KWS engine auto-initializes when these flags are on:
+
+```
+[ai_audio_input.c:355] audio input -> wakeup mode set from 0 to 1!
+WAKEUP_info: nihaotuya-xiaozhitongxue-heytuya-hituya--200KB--20250804
+```
+
+### CP13 — Wi-Fi state machine with KV + AP fallback
+
+Three-tier connect priority in `nav_app_main`:
+
+1. KV-stored creds (set via web UI) — `wifi.ssid` + `wifi.pass` keys
+2. Build-time `NAV_SSID_LIST` (existing v0.2.0 path)
+3. AP-mode fallback — `IRIS-XXXX` open network on `192.168.4.1`
+
+If station mode times out at all three steps, the device stays in AP mode forever and the web UI is reachable so the user can configure new credentials. After save, the device persists to KV and reboots — next boot tries the new creds first.
+
+### CP14–CP15 — Embedded HTTP server + Wi-Fi setup page
+
+Single-threaded HTTP/1.0 server bound on port 80, INADDR_ANY, backlog 4. Deliberately HTTP/1.0 with `Connection: close` so each request is a fresh socket and we don't track connection state.
+
+Routes shipped in v0.3.0:
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/` | Home — nav + quick links |
+| GET | `/wifi` | Wi-Fi scan + select + password form |
+| GET | `/settings` | Volume / brightness / voice / language / wake-feedback form |
+| GET | `/diagnostics` | System telemetry + manual NAVIGATE/READ trigger buttons |
+| GET | `/api/status` | JSON device status |
+| POST | `/api/wifi/save` | Persist Wi-Fi creds → reboot |
+| POST | `/api/settings/save` | Persist runtime settings (live-applies brightness) |
+| POST | `/api/test/tap` | Fire single-tap (NAVIGATE) handler |
+| POST | `/api/test/double_tap` | Fire double-tap (READ TEXT) handler |
+
+Visual style mirrors the device LCD: `#05070A` deep obsidian background, Space Grotesk headings + JetBrains Mono labels (Google Fonts CDN), IRIS cyan `#4FE3F0` accents. Cards, rounded inputs, ring-only buttons. No external CSS framework — everything inlined in the `HEAD` constant.
+
+### CP16 — NTP-driven status-bar clock
+
+`tal_time_service` auto-syncs once Wi-Fi is up. Added `nav_clock_update` running on a `tal_sw_timer` every 30 seconds, formatting POSIX time as `HH:MM` and pushing to a new `s_clock_label` widget anchored top-right on every state's display layer.
+
+### CP17 — Settings persistence
+
+Five KV keys for runtime tuneables, with public accessors consumed by the web UI:
+
+| KV key | Type | Default | Range |
+|---|---|---|---|
+| `set.vol` | int | 70 | 0–100 |
+| `set.bri` | int | 80 | 10–100 |
+| `set.voice` | str | "MID" | LO / MID / HI |
+| `set.lang` | str | "EN" | EN / ES / HI / AR |
+| `set.wakefb` | int | 0 | 0/1 |
+
+`tal_kv` returns heap pointers — every read pairs `tal_kv_get` with `tal_kv_free`. Saves URL-decode the form-encoded body in place via `url_decode` then call the typed setter.
+
+### CP18 — Diagnostics + brightness + buffer-overflow fix
+
+Three landings in one wave:
+
+1. **`/diagnostics` page** — wake-event counter (proves the KWS callback is firing even when behavior seems silent), free heap, IP, uptime, plus two manual-trigger buttons that POST to `/api/test/tap` and `/api/test/double_tap` to simulate gestures without physical touch.
+2. **Live brightness application** — `nav_settings_set_brightness` now resolves the display handle via `tdl_disp_find_dev("display")` and calls `tdl_disp_set_brightness(handle, 0–100)`, which scales internally to the PWM duty (1 kHz, 0–10000). Saved value re-applied on every boot just after `nav_display_init()`.
+3. **Streaming page renderer** — fixed a class of bug where `route_home` had a 3072-byte buffer but `HEAD` alone is 3644 bytes. `snprintf` returned a length larger than the buffer, the size guard `n < sizeof(resp)` correctly rejected the buffer, and the response was silently dropped — browser saw `ERR_EMPTY_RESPONSE`. New `send_html_page(fd, body)` streams `HTTP headers → HEAD → body → FOOT` in separate `tal_net_send` calls so routes only need to size the body chunk.
+
+### Deferred from v0.3.0 → v0.4.0
+
+| Item | Why deferred |
+|---|---|
+| **mDNS hostname `iris.local`** | TuyaOpen's lwIP build does not have `LWIP_MDNS_RESPONDER=1` by default; enabling requires a platform-level rebuild beyond the app scope. Use the device IP from `/api/status` or the router admin page until then. |
+| **Captive-portal DNS hijack** | Same reason — needs lwIP MDNS or a DNS-redirect helper. AP mode still works; the user just types `192.168.4.1` directly. |
+| **USB host (mic / camera / speaker takeover)** | USB host stack init conflicted with the camera DVP path in CP12 experiments → boot loop. Needs platform-level investigation. |
+| **Wake-word audible feedback play** | Kconfig + KV toggle are wired, but the actual `ai_audio_player_alert` call must run off the KWS callback thread (otherwise it blocks subsequent wake detections — proven by CP12e regression). Needs a `tal_workq`-based deferral wrapper. |
+
+---
+
 ## Deferrals (updated 2026-05-02 after CP11b landed)
 
 | Item | Why deferred |
