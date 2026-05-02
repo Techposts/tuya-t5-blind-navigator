@@ -24,3 +24,7 @@ __pycache__/
 flash.log
 releases/*.bin
 
+# Disabled / experimental files (kept on local disk, not in repo)
+*.disabled
+firmware/blind_navigator/GEMINI.md
+
