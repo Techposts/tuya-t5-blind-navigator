@@ -428,6 +428,15 @@ extern int nav_settings_get_volume(void);  /* defined below; forward-decl for lo
  * the local-WAV alert path. The message also serves as a self-introduction
  * if a sighted helper presses the button. */
 void nav_diag_play_test_alert(void) {
+    /* v0.3.3: TEST SPEAKER shares s_pending_pcm + the player ring buffer with
+     * NAVIGATE/READ/IDENTIFY. Concurrent kicks produce "player ring buf write
+     * failed" and ai_audio_player.c:382 ret:-2. Refuse if a real query is in
+     * flight rather than corrupting it. */
+    if (!s_idle) {
+        PR_NOTICE("[DIAG] test speaker refused: device busy");
+        return;
+    }
+    s_idle = 0;
     static const char *welcome =
         "I am IRIS, your vision co-pilot. "
         "Single tap the screen to navigate, double tap to read text, "
@@ -436,6 +445,30 @@ void nav_diag_play_test_alert(void) {
     PR_NOTICE("[DIAG] test speaker via TTS, vol=%d", nav_settings_get_volume());
     play_response_kick(welcome);
     play_response_wait();
+    /* v0.3.3 fix: play_response_kick sets DISP_STATE_SPEAKING, but only the
+     * NAVIGATE/READ flow restores IDLE. Without this line the device gets
+     * stuck on the speaking screen forever (visual eye + waveform animating
+     * with no audio), forcing the user to physically reset. */
+    nav_display_set_state(DISP_STATE_IDLE);
+    s_idle = 1;
+}
+
+/* v0.3.3: brief on-connect introduction. Played once after Wi-Fi station
+ * connect succeeds and the audio chain is up. Tells a first-time user what
+ * the device is and how to drive it. Synchronous: blocks the boot thread
+ * for ~5 s while TTS downloads + plays. The boot thread already takes
+ * 10-15 s, so the extra delay is acceptable for a one-time intro. */
+static void nav_announce_welcome(void) {
+    static const char *intro =
+        "I am IRIS, your vision co-pilot. "
+        "Tap once to navigate, twice to read text, "
+        "long press the button to identify objects.";
+    PR_NOTICE("[BOOT] announcing welcome via TTS");
+    s_idle = 0;
+    play_response_kick(intro);
+    play_response_wait();
+    nav_display_set_state(DISP_STATE_IDLE);
+    s_idle = 1;
 }
 
 /* ============================================================
@@ -731,9 +764,14 @@ void nav_app_main(void) {
     NW_IP_S ip = {0};
     bool connected = false;
 
-    /* CP13 priority chain: 1) KV-stored creds, 2) build-time NAV_SSID_LIST,
-     * 3) AP-mode fallback. The "happy path" (build-time creds reach a
-     * working network) is identical to v0.2.0 behavior. */
+    /* v0.3.3 priority chain: 1) KV creds, 2) build-time NAV_SSID_LIST,
+     * 3) AP-mode fallback.
+     *
+     * The hardcoded-fallback removal originally planned for v0.3.3 was
+     * reverted: AP DHCP is currently broken on this firmware (DHCP server
+     * never leases an IP), so an empty KV with no fallback would trap the
+     * device with no recovery path post-flash. The fallback stays until
+     * v0.3.4 fixes AP DHCP. */
 
     /* CP21: if forget-wifi was triggered (web button or 5s physical hold),
      * the KV flag is set. Skip both station tries and go directly to AP so
@@ -754,7 +792,9 @@ void nav_app_main(void) {
 
     /* Try 2: build-time NAV_SSID_LIST (skip when force_ap is armed -- the user
      * explicitly asked to test AP mode, don't silently fall back to a hardcoded
-     * SSID that would defeat the purpose of forgetting Wi-Fi). */
+     * SSID that would defeat the purpose of forgetting Wi-Fi). Restored in
+     * v0.3.3 because AP DHCP is currently broken; without this fallback an
+     * empty KV (e.g. post-flash) traps the device unrecoverably. */
     if (!connected && !force_ap) {
         for (int idx = 0; idx < NAV_SSID_COUNT && !connected; idx++) {
             connected = nav_wifi_try_station(NAV_SSID_LIST[idx], NAV_WIFI_PASS, &ip);
@@ -818,6 +858,14 @@ void nav_app_main(void) {
     /* CP20 fix: apply saved volume so it persists across reboots, just like
      * brightness. Must run AFTER ai_audio_player_init or the codec isn't ready. */
     ai_audio_player_set_vol(nav_settings_get_volume());
+
+    /* v0.3.3: speak a brief intro now that Wi-Fi is up + audio chain is ready.
+     * Tells a first-time user what the device is and how to use it. Blocks
+     * boot for ~5 s; acceptable since boot is already 10-15 s and this is
+     * a one-time greeting per power-on. Skipped silently if TTS proxy is
+     * unreachable -- play_response_wait handles s_pending_pcm == NULL. */
+    nav_announce_welcome();
+
     ai_video_init(&(AI_VIDEO_CFG_T){0});
     
     BUTTON_GPIO_CFG_T gpio_bc = {
@@ -860,8 +908,12 @@ void nav_app_main(void) {
     nav_display_set_double_tap_cb(touch_double_tap_trigger);  /* CP9: double-tap to repeat */
 
     /* CP12d: hook our callback into the already-running KWS engine.
-     * No init needed -- TuyaOpen auto-starts KWS + audio_input when the
-     * WAKEUP/AUDIO components are compiled in (per Kconfig). */
+     * v0.3.3 fix: explicitly call tkl_kws_init -- the assumption that
+     * Kconfig auto-init was enough was wrong. Reference path in TuyaOpen's
+     * ai_chat_main.c also calls tkl_kws_init() right after audio init.
+     * Without this, the engine loads the model but never starts the
+     * detection loop, so wake_count stays at 0. */
+    tkl_kws_init();
     tkl_kws_reg_wakeup_cb(wake_word_cb);
 
     

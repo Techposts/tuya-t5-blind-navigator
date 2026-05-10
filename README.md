@@ -19,13 +19,25 @@ The device is a **navigation co-pilot**, not a tour guide — every response is 
 
 ---
 
-## What v0.3.2 ships
+## What v0.3.3 ships
+
+The "Hi Tuya" wake word now fires reliably. The Wanson KWS engine was loading the model and registering our callback, but it was never starting the I2S capture loop — `tkl_kws_init()` was missing. One added line; verified on hardware by saying "Hi Tuya" and watching NAVIGATE fire without any tap.
+
+The device also now introduces itself audibly on first boot. Right after Wi-Fi connects and the audio chain is up, IRIS speaks a 3-sentence intro through the speaker: *"I am IRIS, your vision co-pilot. Tap once to navigate, twice to read text, long press the button to identify objects."* — first-time users hear what the device does without needing to read the LCD.
+
+The TEST SPEAKER button in the web UI no longer leaves the device stuck on the speaking visual screen — explicit IDLE restore after the welcome plays. A concurrency guard also refuses TEST SPEAKER while NAVIGATE / READ / IDENTIFY is in flight (was producing ring-buffer corruption when both fired at once).
+
+**Known open issues** (deferred to v0.3.4):
+
+- **TTS audio cuts off / occasionally silent** — regression from the wake-word fix. The KWS engine now keeps the I2S input path active continuously (necessary for "Hi Tuya" to work), which contends with the I2S output path during TTS playback. Symptom: welcome message and NAVIGATE / READ responses sometimes end mid-sentence or don't play at all. v0.3.4 fix: suspend KWS during playback, resume after.
+- **AP DHCP flakiness** — post-flash, when the device boots into AP mode for provisioning, phones sometimes get "network temporarily unavailable" or no IP on first connect attempt. Succeeds after 1-3 retries. Probable platform-level race between `bk_wifi_ap_start` returning and the netif coming up. Application code matches Tuya's production reference byte-for-byte; this is a platform-timing issue.
+- **Captive portal hijack** — joining the IRIS AP shows "Internet may not be available" because there's no internet on the AP-only network. Workaround: ignore the warning, manually open `192.168.4.1`. v0.3.4 will add a UDP/53 DNS hijack so the standard "Sign in to network" sheet appears.
+
+## What v0.3.2 shipped
 
 The audio path now actually works end-to-end. Voice descriptions play through the onboard speaker for every NAVIGATE / READ / IDENTIFY query. Earlier releases had a silent-codec bug where `tkl_ao_put_frame` returned `-23 OPRT_RESOURCE_NOT_READY` because the audio output engine was never initialized — fixed in v0.3.2 by an explicit `tdl_audio_open` during boot.
 
 Other improvements: the response parser now actually surfaces the LLM's `SPOKEN` line (was capped at 4 fields and dropping the 5th); audio + display fields appear together via a `kick + wait` split around the TTS download; camera warmup halved from 3.5 s to 1.5 s; TEST SPEAKER button now plays a real TTS welcome message instead of a generic alert; Mac-side flashing tools shipped in `tools/`.
-
-**Known open issue**: "Hi Tuya" wake word doesn't fire reliably yet. Touch + button gestures work; voice activation needs another debug pass. Deferred to v0.3.3.
 
 Everything from v0.3.1 plus a polish wave that addresses every UX gap surfaced by hardware testing:
 
