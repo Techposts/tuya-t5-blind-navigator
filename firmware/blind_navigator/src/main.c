@@ -340,6 +340,12 @@ static void proc_th(void *arg) {
     uint8_t *jpeg = NULL; uint32_t jlen = 0;
     OPERATE_RET ret = ai_video_get_jpeg_frame(&jpeg, &jlen);
     ai_video_display_stop();
+    /* v0.3.5 hallucination diagnosis: log JPEG byte count. Healthy 480x480
+     * Q80 frames are 12-30 KB. < 4 KB usually means a black frame, lens cap,
+     * or capture race. > 60 KB is also suspicious (clipped). The user has
+     * reported the LLM occasionally falling back to generic "wall ahead"
+     * answers; tiny frames are the most likely cause. */
+    PR_NOTICE("[CAM] frame ret=%d size=%u bytes", (int)ret, (unsigned)jlen);
 
     if (ret == OPRT_OK && jpeg && jlen > 0) {
         /* CP9: switch to THINKING + randomize the data bars so they look alive */
@@ -361,13 +367,26 @@ static void proc_th(void *arg) {
         if      (strcmp(lang_code, "HI") == 0) lang_name = "Hindi";
         else if (strcmp(lang_code, "ES") == 0) lang_name = "Spanish";
         else if (strcmp(lang_code, "AR") == 0) lang_name = "Arabic";
-        char prompt_buf[1536];
+        char prompt_buf[1792];
+        /* v0.3.5: prompt now also has explicit anti-hallucination grounding.
+         * User reported the LLM occasionally falling back to generic
+         * descriptions ("wall ahead, go ahead and...") when the camera
+         * was clearly pointing at a face or object. Force the model to
+         * commit to what's literally visible OR to confess if image is
+         * unusable -- much better than confabulation. */
         snprintf(prompt_buf, sizeof(prompt_buf),
-                 "%s\n\nIMPORTANT: Write the SPOKEN line in %s. Keep the other "
+                 "%s\n\n"
+                 "GROUNDING: Describe ONLY what is literally visible in this "
+                 "image. If the image is dark, blurry, blank, or out of focus, "
+                 "set PATH STATUS to UNCLEAR and WHERE to 'Image quality poor "
+                 "- cannot describe scene'. Do not invent objects, walls, or "
+                 "people that you are not directly observing. Mention specific "
+                 "colors, textures, and arrangements you can actually see.\n\n"
+                 "IMPORTANT: Write the SPOKEN line in %s. Keep the other "
                  "fields (PATH STATUS, WHERE, ACTION, WHY) in English for the "
                  "display.",
                  s_active_prompt, lang_name);
-        PR_NOTICE("[LANG] using language=%s for SPOKEN", lang_name);
+        PR_NOTICE("[LANG] language=%s, prompt_len=%d", lang_name, (int)strlen(prompt_buf));
 
         char *resp = NULL;
         if (openai_ask_image(jpeg, jlen, prompt_buf, &resp) == OPRT_OK) {
@@ -646,12 +665,47 @@ void nav_diag_play_test_alert(void) {
         return;
     }
     s_idle = 0;
-    static const char *welcome =
+
+    /* v0.3.5: TEST SPEAKER respects the /settings language. Unlike NAVIGATE
+     * (which has GPT-4o-mini in the loop and can be told "respond in
+     * Hindi"), TEST SPEAKER goes straight from a hardcoded string to TTS,
+     * so we keep one pre-translated welcome per supported language. The
+     * gpt-4o-mini-tts alloy voice handles all four natively without
+     * separate voice config. UTF-8 strings are inline. */
+    char lang_code[16] = {0};
+    nav_settings_get_language(lang_code, sizeof(lang_code));
+
+    static const char *welcome_en =
         "I am IRIS, your vision co-pilot. "
         "Single tap the screen to navigate, double tap to read text, "
         "long press the button to identify objects. "
         "I am listening for Hi Tuya as the wake word.";
-    PR_NOTICE("[DIAG] test speaker via TTS, vol=%d", nav_settings_get_volume());
+    static const char *welcome_hi =
+        "\xe0\xa4\xae\xe0\xa5\x88\xe0\xa4\x82 \x49\x52\x49\x53 \xe0\xa4\xb9\xe0\xa5\x82\xe0\xa4\x81, "
+        "\xe0\xa4\x86\xe0\xa4\xaa\xe0\xa4\x95\xe0\xa4\xbe \xe0\xa4\xb5\xe0\xa4\xbf\xe0\xa4\x9c\xe0\xa4\xbc\xe0\xa4\xa8 \xe0\xa4\x95\xe0\xa5\x8b-\xe0\xa4\xaa\xe0\xa4\xbe\xe0\xa4\x87\xe0\xa4\xb2\xe0\xa4\x9f\xe0\xa5\xa4 "
+        "\xe0\xa4\xa8\xe0\xa5\x87\xe0\xa4\xb5\xe0\xa4\xbf\xe0\xa4\x97\xe0\xa5\x87\xe0\xa4\x9f \xe0\xa4\x95\xe0\xa4\xb0\xe0\xa4\xa8\xe0\xa5\x87 \xe0\xa4\x95\xe0\xa5\x87 \xe0\xa4\xb2\xe0\xa4\xbf\xe0\xa4\x8f \xe0\xa4\x8f\xe0\xa4\x95 \xe0\xa4\xac\xe0\xa4\xbe\xe0\xa4\xb0 \xe0\xa4\x9f\xe0\xa5\x88\xe0\xa4\xaa \xe0\xa4\x95\xe0\xa4\xb0\xe0\xa5\x87\xe0\xa4\x82, "
+        "\xe0\xa4\x9f\xe0\xa5\x87\xe0\xa4\x95\xe0\xa5\x8d\xe0\xa4\xb8\xe0\xa5\x8d\xe0\xa4\x9f \xe0\xa4\xaa\xe0\xa4\xa2\xe0\xa4\xbc\xe0\xa4\xa8\xe0\xa5\x87 \xe0\xa4\x95\xe0\xa5\x87 \xe0\xa4\xb2\xe0\xa4\xbf\xe0\xa4\x8f \xe0\xa4\xa6\xe0\xa5\x8b \xe0\xa4\xac\xe0\xa4\xbe\xe0\xa4\xb0 \xe0\xa4\x9f\xe0\xa5\x88\xe0\xa4\xaa \xe0\xa4\x95\xe0\xa4\xb0\xe0\xa5\x87\xe0\xa4\x82, "
+        "\xe0\xa4\x91\xe0\xa4\xac\xe0\xa5\x8d\xe0\xa4\x9c\xe0\xa5\x87\xe0\xa4\x95\xe0\xa5\x8d\xe0\xa4\x9f \xe0\xa4\xaa\xe0\xa4\xb9\xe0\xa4\x9a\xe0\xa4\xbe\xe0\xa4\xa8\xe0\xa4\xa8\xe0\xa5\x87 \xe0\xa4\x95\xe0\xa5\x87 \xe0\xa4\xb2\xe0\xa4\xbf\xe0\xa4\x8f \xe0\xa4\xac\xe0\xa4\x9f\xe0\xa4\xa8 \xe0\xa4\x95\xe0\xa5\x8b \xe0\xa4\xa6\xe0\xa5\x87\xe0\xa4\xb0 \xe0\xa4\xa4\xe0\xa4\x95 \xe0\xa4\xa6\xe0\xa4\xac\xe0\xa4\xbe\xe0\xa4\x8f\xe0\xa4\x82\xe0\xa5\xa4 "
+        "\xe0\xa4\xae\xe0\xa5\x88\xe0\xa4\x82 \x48\x69 \x54\x75\x79\x61 \xe0\xa4\xb5\xe0\xa5\x87\xe0\xa4\x95 \xe0\xa4\xb5\xe0\xa4\xb0\xe0\xa5\x8d\xe0\xa4\xa1 \xe0\xa4\x95\xe0\xa5\x87 \xe0\xa4\xb0\xe0\xa5\x82\xe0\xa4\xaa \xe0\xa4\xae\xe0\xa5\x87\xe0\xa4\x82 \xe0\xa4\xb8\xe0\xa5\x81\xe0\xa4\xa8 \xe0\xa4\xb0\xe0\xa4\xb9\xe0\xa5\x80 \xe0\xa4\xb9\xe0\xa5\x82\xe0\xa4\x81\xe0\xa5\xa4";
+    static const char *welcome_es =
+        "Soy IRIS, tu copiloto de visi\xc3\xb3n. "
+        "Toca la pantalla una vez para navegar, dos veces para leer texto, "
+        "mant\xc3\xa9n pulsado el bot\xc3\xb3n para identificar objetos. "
+        "Estoy escuchando 'Hi Tuya' como palabra de activaci\xc3\xb3n.";
+    static const char *welcome_ar =
+        "\xd8\xa3\xd9\x86\xd8\xa7 \x49\x52\x49\x53\xd8\x8c \xd9\x85\xd8\xb3\xd8\xa7\xd8\xb9\xd8\xaf\xd9\x83 \xd8\xa7\xd9\x84\xd8\xa8\xd8\xb5\xd8\xb1\xd9\x8a\xd9\x91. "
+        "\xd8\xa7\xd9\x86\xd9\x82\xd8\xb1 \xd8\xa7\xd9\x84\xd8\xb4\xd8\xa7\xd8\xb4\xd8\xa9 \xd9\x85\xd8\xb1\xd9\x91\xd8\xa9 \xd9\x84\xd9\x84\xd8\xaa\xd9\x86\xd9\x82\xd9\x91\xd9\x84\xd8\x8c "
+        "\xd9\x85\xd8\xb1\xd9\x91\xd8\xaa\xd9\x8a\xd9\x86 \xd9\x84\xd9\x82\xd8\xb1\xd8\xa7\xd8\xa1\xd8\xa9 \xd8\xa7\xd9\x84\xd9\x86\xd8\xb5\xd9\x91\xd8\x8c "
+        "\xd9\x88\xd8\xa7\xd8\xb6\xd8\xba\xd8\xb7 \xd9\x85\xd8\xb7\xd9\x88\xd9\x91\xd9\x84\xd8\xa7\xd9\x8b \xd8\xb9\xd9\x84\xd9\x89 \xd8\xa7\xd9\x84\xd8\xb2\xd8\xb1\xd9\x91 \xd9\x84\xd9\x84\xd8\xaa\xd8\xb9\xd8\xb1\xd9\x91\xd9\x81 \xd8\xb9\xd9\x84\xd9\x89 \xd8\xa7\xd9\x84\xd8\xa3\xd8\xb4\xd9\x8a\xd8\xa7\xd8\xa1. "
+        "\xd8\xa3\xd8\xb3\xd8\xaa\xd9\x85\xd8\xb9 \xd9\x84\x48\x69\x20\x54\x75\x79\x61 \xd9\x83\xd9\x83\xd9\x84\xd9\x85\xd8\xa9 \xd8\xa5\xd9\x8a\xd9\x82\xd8\xa7\xd8\xb8.";
+
+    const char *welcome = welcome_en;
+    const char *lang_name = "English";
+    if      (strcmp(lang_code, "HI") == 0) { welcome = welcome_hi; lang_name = "Hindi"; }
+    else if (strcmp(lang_code, "ES") == 0) { welcome = welcome_es; lang_name = "Spanish"; }
+    else if (strcmp(lang_code, "AR") == 0) { welcome = welcome_ar; lang_name = "Arabic"; }
+    PR_NOTICE("[DIAG] test speaker via TTS, vol=%d, lang=%s",
+              nav_settings_get_volume(), lang_name);
     play_response_kick(welcome);
     play_response_wait();
     /* v0.3.3 fix: play_response_kick sets DISP_STATE_SPEAKING, but only the

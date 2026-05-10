@@ -117,6 +117,15 @@ static void bar_h_cb(void *obj, int32_t v) {
 
 static void s_boot_hide_cb(lv_timer_t *t);  /* CP8: forward decl */
 
+/* v0.3.5: 180-degree rotation REMOVED. Two attempts (synchronous in init,
+ * then deferred via lv_timer at 250 ms) both crashed the LVGL render
+ * thread with UsageFault / unaligned access. Tuya's LVGL wrapper is not
+ * a fully-conformant LVGL host -- lv_display_set_rotation() is unsafe
+ * to call against the default display object on this platform. If
+ * rotation is needed in the future, it will have to be done at the
+ * panel-driver layer (re-init the LCD with mirrored row/column order)
+ * not via LVGL. */
+
 static lv_color_t state_color(disp_state_t st) {
     switch (st) {
         case DISP_STATE_IDLE:        return COL_IDLE;
@@ -917,6 +926,8 @@ OPERATE_RET nav_display_init(void) {
     /* CP8: auto-hide boot splash after 2s */
     s_boot_timer = lv_timer_create(s_boot_hide_cb, 2000, NULL);
     lv_timer_set_repeat_count(s_boot_timer, 1);
+
+    /* v0.3.5: 180-degree rotation removed. See block at top of file. */
 
     return OPRT_OK;
 }
