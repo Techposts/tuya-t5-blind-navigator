@@ -52,6 +52,31 @@ static void play_response(const char *text) {
     }
 }
 
+/* CP23 split: kick audio + populate display + wait. Used when caller wants to
+ * update the display fields *concurrent* with audio playback rather than
+ * before-or-after. Returns from kick once audio is queued (TTS download done,
+ * 2-3s); audio plays in the background while display updates; then caller
+ * calls wait to block until playback finishes. */
+static uint8_t  *s_pending_pcm = NULL;
+static void play_response_kick(const char *text) {
+    snprintf(s_last_response, sizeof(s_last_response), "%s", text);
+    nav_display_set_state(DISP_STATE_SPEAKING);
+    uint32_t len = 0;
+    if (openai_tts(text, &s_pending_pcm, &len) == OPRT_OK && s_pending_pcm) {
+        ai_audio_play_tts_stream(AI_AUDIO_PLAYER_TTS_START, AI_AUDIO_CODEC_WAV, NULL, 0);
+        ai_audio_play_tts_stream(AI_AUDIO_PLAYER_TTS_DATA, AI_AUDIO_CODEC_WAV, (char*)s_pending_pcm, len);
+        ai_audio_play_tts_stream(AI_AUDIO_PLAYER_TTS_STOP, AI_AUDIO_CODEC_WAV, NULL, 0);
+        /* return now -- caller updates display; we'll free + wait later */
+    }
+}
+static void play_response_wait(void) {
+    if (!s_pending_pcm) return;
+    int timeout = 200;
+    while (ai_audio_player_is_playing() && timeout--) tal_system_sleep(100);
+    tal_psram_free(s_pending_pcm);
+    s_pending_pcm = NULL;
+}
+
 /* CP9: replay the last response without re-querying the LLM. Used for
  * double-tap-to-repeat. Idempotent and safe to call when no prior response. */
 static void replay_last_response_th(void *arg) {
@@ -110,7 +135,13 @@ static void parse_labeled_response(const char *resp, parsed_resp_t *out) {
     char buf[2048];
     snprintf(buf, sizeof(buf), "%s", resp);
     char *line = strtok(buf, "\n");
-    while (line && out->field_count < 4) {
+    /* CP23 fix: keep parsing until end-of-input. The earlier code had
+     * `while (line && field_count < 4)` which exited after PATH STATUS, WHERE,
+     * ACTION, WHY -- never reaching SPOKEN (the 5th labeled line). The TTS
+     * then fell back to joining the 4 short visual fields, producing brief
+     * audio that just read the screen. The 4-field cap moves to the display-
+     * field branch below; SPOKEN always gets parsed. */
+    while (line) {
         char *colon = strchr(line, ':');
         if (!colon) { line = strtok(NULL, "\n"); continue; }
         *colon = 0;
@@ -122,7 +153,7 @@ static void parse_labeled_response(const char *resp, parsed_resp_t *out) {
         if (strcasecmp(lab, "SPOKEN") == 0 || strcasecmp(lab, "SPEECH") == 0) {
             snprintf(out->spoken, sizeof(out->spoken), "%s", val);
             out->has_spoken = 1;
-        } else {
+        } else if (out->field_count < 4) {
             snprintf(out->labels[out->field_count], sizeof(out->labels[0]), "%s", lab);
             snprintf(out->values[out->field_count], sizeof(out->values[0]), "%s", val);
             out->field_count++;
@@ -151,7 +182,10 @@ static void proc_th(void *arg) {
      * back to IDLE after. */
     nav_display_set_state(DISP_STATE_LISTENING);  /* CAPTURE screen */
     ai_video_display_start();
-    tal_system_sleep(3500);  /* camera autoexpose + warmup */
+    /* CP23 perf: GC2145 stabilizes quickly; 1500ms is enough exposure-warmup
+     * for navigation use. Was 3500ms which added 2s of latency to every query
+     * for marginal image quality benefit. */
+    tal_system_sleep(1500);
     uint8_t *jpeg = NULL; uint32_t jlen = 0;
     OPERATE_RET ret = ai_video_get_jpeg_frame(&jpeg, &jlen);
     ai_video_display_stop();
@@ -167,12 +201,22 @@ static void proc_th(void *arg) {
              * with the 4 (label, value) pairs, then TTS the SPOKEN line. */
             parsed_resp_t pr;
             parse_labeled_response(resp, &pr);
+            /* CP23 final: split kick + wait so audio and display arrive
+             * together. play_response_kick downloads TTS (~2s) and queues
+             * audio to the player but returns BEFORE playback completes.
+             * Then we populate the display fields. Audio is already playing
+             * by the time the display widgets render -- both visible to the
+             * user within milliseconds of each other. play_response_wait
+             * blocks until audio finishes so the rest of proc_th's linger
+             * timing is unchanged. */
+            const char *spoken = pr.has_spoken || pr.field_count > 0 ? pr.spoken : resp;
+            play_response_kick(spoken);
             nav_display_set_speak_response(
                 pr.labels[0], pr.values[0],
                 pr.labels[1], pr.values[1],
                 pr.labels[2], pr.values[2],
                 pr.labels[3], pr.values[3]);
-            play_response(pr.has_spoken || pr.field_count > 0 ? pr.spoken : resp);
+            play_response_wait();
             tal_free(resp);
         } else {
             nav_display_set_state(DISP_STATE_ERROR);
@@ -371,6 +415,28 @@ uint32_t nav_diag_get_wake_count(void) { return s_wake_count; }
 void     nav_diag_trigger_tap(void)        { touch_tap_trigger(); }
 void     nav_diag_trigger_double_tap(void) { touch_double_tap_trigger(); }
 void     nav_diag_trigger_identify(void)   { touch_swipe_up_trigger(); }
+
+/* CP23: speaker test diagnostic. Plays the built-in local "Hello, I'm here"
+ * alert WAV via ai_audio_player. No network, no TTS, no proxy. If this
+ * makes sound, audio output path (codec + I2S + speaker) is working. If
+ * silent, speaker/codec/I2S are the suspects. */
+extern OPERATE_RET ai_audio_player_alert(AI_AUDIO_ALERT_TYPE_E type);
+extern int nav_settings_get_volume(void);  /* defined below; forward-decl for log line */
+/* CP23 v0.3.2: TEST SPEAKER button now plays a welcome message via the same
+ * TTS pipeline real responses use. This validates the whole audio chain end-
+ * to-end (proxy → OpenAI TTS → device receive → codec → speaker), not just
+ * the local-WAV alert path. The message also serves as a self-introduction
+ * if a sighted helper presses the button. */
+void nav_diag_play_test_alert(void) {
+    static const char *welcome =
+        "I am IRIS, your vision co-pilot. "
+        "Single tap the screen to navigate, double tap to read text, "
+        "long press the button to identify objects. "
+        "I am listening for Hi Tuya as the wake word.";
+    PR_NOTICE("[DIAG] test speaker via TTS, vol=%d", nav_settings_get_volume());
+    play_response_kick(welcome);
+    play_response_wait();
+}
 
 /* ============================================================
  * CP13: Wi-Fi state machine helpers (KV + station + AP fallback)
@@ -722,6 +788,32 @@ void nav_app_main(void) {
     nav_clock_update(NULL, NULL);  /* fire once now */
 
     nav_display_set_ip(ip.ip); nav_display_set_wifi(true);
+
+    /* CP23 FIX (silent-audio root cause): the audio codec needs to be opened
+     * via tdl_audio_open before tkl_ao_put_frame works. Without it, every
+     * playback call returns -23 OPRT_RESOURCE_NOT_READY.
+     *
+     * v1 (this session, earlier) called ai_audio_input_init which works but
+     * allocates a 12.8-second recorder buffer (~400 KB at 16 kHz mono 16-bit)
+     * that we never use -- IRIS only plays audio, doesn't stream mic in.
+     * Free heap dropped from 121 KB to 26-43 KB, breaking the TTS receive
+     * path which needs ~50-150 KB to buffer the response WAV.
+     *
+     * v2 (current): just call tdl_audio_open directly. Same effect on the
+     * codec init flags, no recorder allocation. */
+    {
+        extern int tdl_audio_find(char *, void **);
+        extern int tdl_audio_open(void *, void *);
+        void *audio_hdl = NULL;
+        int rt_open = tdl_audio_find(AUDIO_CODEC_NAME, &audio_hdl);
+        if (rt_open == 0 && audio_hdl) {
+            rt_open = tdl_audio_open(audio_hdl, NULL);
+            PR_NOTICE("[AUDIO] tdl_audio_open(\"%s\") = 0x%x", AUDIO_CODEC_NAME, rt_open);
+        } else {
+            PR_ERR("[AUDIO] tdl_audio_find failed: %d", rt_open);
+        }
+    }
+
     ai_audio_player_init();
     /* CP20 fix: apply saved volume so it persists across reboots, just like
      * brightness. Must run AFTER ai_audio_player_init or the codec isn't ready. */

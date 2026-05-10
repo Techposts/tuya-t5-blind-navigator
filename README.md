@@ -19,9 +19,15 @@ The device is a **navigation co-pilot**, not a tour guide — every response is 
 
 ---
 
-## What v0.3.1 ships
+## What v0.3.2 ships
 
-Everything from v0.3.0 plus a polish wave that addresses every UX gap surfaced by hardware testing:
+The audio path now actually works end-to-end. Voice descriptions play through the onboard speaker for every NAVIGATE / READ / IDENTIFY query. Earlier releases had a silent-codec bug where `tkl_ao_put_frame` returned `-23 OPRT_RESOURCE_NOT_READY` because the audio output engine was never initialized — fixed in v0.3.2 by an explicit `tdl_audio_open` during boot.
+
+Other improvements: the response parser now actually surfaces the LLM's `SPOKEN` line (was capped at 4 fields and dropping the 5th); audio + display fields appear together via a `kick + wait` split around the TTS download; camera warmup halved from 3.5 s to 1.5 s; TEST SPEAKER button now plays a real TTS welcome message instead of a generic alert; Mac-side flashing tools shipped in `tools/`.
+
+**Known open issue**: "Hi Tuya" wake word doesn't fire reliably yet. Touch + button gestures work; voice activation needs another debug pass. Deferred to v0.3.3.
+
+Everything from v0.3.1 plus a polish wave that addresses every UX gap surfaced by hardware testing:
 
 | Feature | Status |
 |---|---|
