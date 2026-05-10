@@ -54,6 +54,170 @@ static volatile int s_play_interrupt = 0;
  * declare it here. */
 extern OPERATE_RET tkl_kws_feed_with_vad(uint8_t *data, uint16_t datalen, uint8_t vadflag);
 
+/* ============================================================
+ * v0.3.6: Follow-up Q&A capture pipeline (commit C scaffolding)
+ * ============================================================
+ * The KWS frame callback already receives every 16 kHz mono s16le frame.
+ * When capture is armed (s_fup_armed == 1), each frame is also memcpy'd
+ * into a fixed-size 8 s ring buffer (256 KB PSRAM, allocated once at boot
+ * before tdl_audio_open). Per-frame peak amplitude + voiced/silence
+ * accounting drives VAD-end so we close the window 1.2 s after the user
+ * stops speaking instead of waiting the full 8 s.
+ *
+ * No new audio init: this is a pure tee on the existing path. KWS
+ * continues to fire normally during a follow-up window so "Hi Tuya"
+ * still acts as an immediate cancel-and-restart.
+ *
+ * Capture-quality guards (per user requirement, v0.3.6):
+ *   - pre-roll: caller has ~250 ms of audio queued before they ever
+ *     call fup_cap_arm() because the cb fills the buffer continuously
+ *     during the dead-zone (the buffer just isn't being recorded yet).
+ *     Wait -- actually with armed==0 we drop frames, so pre-roll is 0.
+ *     The dead-zone (300 ms) sits BEFORE arm, so the codec tail bleed
+ *     from TTS is gone by the time we start capturing. Front-clip risk
+ *     remains low because the user typically pauses before speaking.
+ *   - tail: VAD-end requires 1.2 s of silence AFTER voiced audio so
+ *     mid-word silences don't close the window prematurely.
+ *   - clipping: per-window peak amplitude is logged; >95% of int16
+ *     range warns about over-gain. */
+
+#define FUP_CAP_BUF_BYTES         (16000 * 2 * 8)   /* 256000: 8 s @ 16k mono s16le */
+#define FUP_CAP_VAD_THRESH        1500              /* ~5% of int16 full scale */
+#define FUP_CAP_VAD_END_MS        1200              /* trailing silence to close */
+#define FUP_CAP_VAD_MIN_VOICED_MS 500               /* abandon below this */
+#define FUP_CAP_MAX_MS            8000              /* hard timeout */
+
+static uint8_t          *s_fup_buf = NULL;
+static volatile uint32_t s_fup_write      = 0;
+static volatile int      s_fup_armed      = 0;
+static volatile int      s_fup_voiced_ms  = 0;
+static volatile int      s_fup_silence_ms = 0;
+static volatile int      s_fup_peak       = 0;
+static uint32_t          s_fup_start_ms   = 0;
+
+void nav_fup_cap_alloc(void) {
+    if (s_fup_buf) return;
+    s_fup_buf = (uint8_t *)tal_psram_malloc(FUP_CAP_BUF_BYTES);
+    if (!s_fup_buf) PR_ERR("[FOLLOWUP] PSRAM alloc %d bytes failed", FUP_CAP_BUF_BYTES);
+    else            PR_NOTICE("[FOLLOWUP] capture buffer ready (%d KB PSRAM)", FUP_CAP_BUF_BYTES/1024);
+}
+
+static void fup_cap_arm(void) {
+    s_fup_write = 0;
+    s_fup_voiced_ms = 0;
+    s_fup_silence_ms = 0;
+    s_fup_peak = 0;
+    s_fup_start_ms = (uint32_t)tal_system_get_millisecond();
+    s_fup_armed = 1;  /* set last so the cb sees a coherent reset */
+}
+
+static void fup_cap_disarm(void) { s_fup_armed = 0; }
+
+static int fup_cap_done(void) {
+    if (!s_fup_armed) return 1;
+    uint32_t elapsed = (uint32_t)tal_system_get_millisecond() - s_fup_start_ms;
+    if (elapsed >= FUP_CAP_MAX_MS) return 1;
+    if (s_fup_voiced_ms > 0 && s_fup_silence_ms >= FUP_CAP_VAD_END_MS) return 1;
+    return 0;
+}
+
+/* Append + VAD update -- audio-thread context. Must not block / malloc. */
+static void fup_cap_feed(const uint8_t *data, uint32_t len) {
+    if (!s_fup_buf || !s_fup_armed || len == 0) return;
+
+    uint32_t w   = s_fup_write;
+    uint32_t can = (w + len > FUP_CAP_BUF_BYTES) ? (FUP_CAP_BUF_BYTES - w) : len;
+    if (can > 0) {
+        memcpy(s_fup_buf + w, data, can);
+        s_fup_write = w + can;
+    }
+
+    /* Per-frame peak + voiced/silence accounting. 16-bit s16le. */
+    int n = (int)(len / 2);
+    if (n <= 0) return;
+    const int16_t *s = (const int16_t *)data;
+    int frame_peak = 0;
+    for (int i = 0; i < n; i++) {
+        int v = s[i];
+        if (v < 0) v = -v;
+        if (v > frame_peak) frame_peak = v;
+    }
+    if (frame_peak > s_fup_peak) s_fup_peak = frame_peak;
+    int frame_ms = n * 1000 / 16000;
+    if (frame_peak > FUP_CAP_VAD_THRESH) {
+        s_fup_voiced_ms += frame_ms;
+        s_fup_silence_ms = 0;
+    } else if (s_fup_voiced_ms > 0) {
+        s_fup_silence_ms += frame_ms;
+    }
+}
+
+/* Build a 44-byte RIFF/WAVE header for 16 kHz mono s16le PCM. */
+static void fup_wav_header(uint8_t *hdr, uint32_t pcm_len) {
+    const uint32_t sr = 16000, br = 16000 * 2;
+    const uint16_t ch = 1, bits = 16, ba = 2, fmt_id = 1;
+    const uint32_t fmt_sz = 16, file_sz = pcm_len + 36;
+    memcpy(hdr +  0, "RIFF",   4);  memcpy(hdr +  4, &file_sz, 4);
+    memcpy(hdr +  8, "WAVE",   4);  memcpy(hdr + 12, "fmt ",   4);
+    memcpy(hdr + 16, &fmt_sz,  4);  memcpy(hdr + 20, &fmt_id,  2);
+    memcpy(hdr + 22, &ch,      2);  memcpy(hdr + 24, &sr,      4);
+    memcpy(hdr + 28, &br,      4);  memcpy(hdr + 32, &ba,      2);
+    memcpy(hdr + 34, &bits,    2);  memcpy(hdr + 36, "data",   4);
+    memcpy(hdr + 40, &pcm_len, 4);
+}
+
+/* Debug worker: arm, wait, build WAV, send to Whisper, log. Spawned from
+ * the webui /api/test/followup_capture endpoint. Lets us validate
+ * capture quality + Whisper round-trip in isolation, before the state
+ * machine integration in commit D. */
+static void fup_capture_test_worker(void *arg) {
+    (void)arg;
+    if (!s_fup_buf)  { PR_ERR("[FOLLOWUP] no buffer"); return; }
+    if (s_fup_armed) { PR_NOTICE("[FOLLOWUP] already armed, skip"); return; }
+
+    PR_NOTICE("[FOLLOWUP] arm (max=%d ms, VAD-end=%d ms silence, min-voiced=%d ms)",
+              FUP_CAP_MAX_MS, FUP_CAP_VAD_END_MS, FUP_CAP_VAD_MIN_VOICED_MS);
+    fup_cap_arm();
+    while (!fup_cap_done()) tal_system_sleep(50);
+    fup_cap_disarm();
+
+    uint32_t pcm_len = s_fup_write;
+    int voiced = s_fup_voiced_ms, peak = s_fup_peak;
+    PR_NOTICE("[FOLLOWUP] closed: pcm=%u bytes voiced=%d ms peak=%d/32767 (%d%%)",
+              (unsigned)pcm_len, voiced, peak, peak * 100 / 32767);
+
+    if (voiced < FUP_CAP_VAD_MIN_VOICED_MS) {
+        PR_NOTICE("[FOLLOWUP] abandon: voiced<%d ms (room tone or no speech)",
+                  FUP_CAP_VAD_MIN_VOICED_MS);
+        return;
+    }
+    if (peak > 31000) {
+        PR_NOTICE("[FOLLOWUP] WARN clipping (peak=%d) -- consider lower mic gain", peak);
+    }
+
+    uint8_t *wav = (uint8_t *)tal_psram_malloc(44 + pcm_len);
+    if (!wav) { PR_ERR("[FOLLOWUP] wav psram alloc failed"); return; }
+    fup_wav_header(wav, pcm_len);
+    memcpy(wav + 44, s_fup_buf, pcm_len);
+
+    char *text = NULL;
+    OPERATE_RET r = openai_transcribe(wav, 44 + pcm_len, &text);
+    tal_psram_free(wav);
+
+    if (r == OPRT_OK && text) {
+        PR_NOTICE("[FOLLOWUP] whisper: \"%s\"", text);
+        tal_free(text);
+    } else {
+        PR_ERR("[FOLLOWUP] whisper failed (rc=%d)", (int)r);
+    }
+}
+
+void nav_diag_test_followup_capture(void) {
+    THREAD_CFG_T c = { .stackDepth = 24576, .priority = 3, .thrdname = "fup" };
+    THREAD_HANDLE h = NULL;
+    tal_thread_create_and_start(&h, NULL, NULL, fup_capture_test_worker, NULL, &c);
+}
+
 /* TDL_AUDIO_MIC_CB signature: void(*)(uint8_t type, uint8_t status,
  * uint8_t *data, uint32_t len). The two enum-typed arguments are typedef'd
  * to uint8_t in tdl_audio_driver.h, so we can match the signature without
@@ -62,6 +226,9 @@ static void nav_audio_frame_cb(uint8_t type, uint8_t status, uint8_t *data, uint
     (void)type; (void)status;
     if (data && len > 0) {
         tkl_kws_feed_with_vad(data, (uint16_t)len, 1);
+        /* v0.3.6: tee into the follow-up ring buffer when armed. No-op
+         * (early return inside fup_cap_feed) when capture is disabled. */
+        fup_cap_feed(data, len);
     }
 }
 /* CP12d: forward decl so wake_word_cb can fire NAVIGATE */
@@ -1132,6 +1299,13 @@ void nav_app_main(void) {
      * "Hi Tuya" not firing in v0.3.3 (the engine loaded the model and the
      * callback was registered, but no frames were ever fed). The function
      * is declared above so we can pass it as a function pointer here. */
+    /* v0.3.6: allocate the follow-up capture ring buffer BEFORE the audio
+     * codec opens, so the very first frame the cb sees has somewhere to go
+     * (when armed). The buffer lives forever -- 256 KB PSRAM is cheap on
+     * the T5AI's 8 MB and removing alloc from the audio thread avoids any
+     * priority-inversion / heap-reentrancy risk during arm. */
+    nav_fup_cap_alloc();
+
     {
         extern int tdl_audio_find(char *, void **);
         extern int tdl_audio_open(void *, void *);

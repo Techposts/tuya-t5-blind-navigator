@@ -44,6 +44,7 @@ extern void     nav_diag_trigger_tap(void);
 extern void     nav_diag_trigger_double_tap(void);
 extern void     nav_diag_trigger_identify(void);
 extern void     nav_diag_play_test_alert(void);   /* CP23: speaker bisect test */
+extern void     nav_diag_test_followup_capture(void);  /* v0.3.6: arm follow-up ring buffer + transcribe via Whisper, log to serial */
 
 /* CP20: state getter for live home dashboard */
 #include "nav_display.h"
@@ -725,6 +726,14 @@ static void route_test_identify(int fd) {
     send_resp_json(fd, "{\"ok\":true,\"action\":\"identify\"}");
 }
 
+/* v0.3.6 debug: arm the follow-up ring buffer (8 s max, VAD-end on
+ * 1.2 s silence), transcribe via Whisper, log result to serial.
+ * Returns immediately -- watch /dev/ttyUSB1 for the [FOLLOWUP] lines. */
+static void route_test_followup_capture(int fd) {
+    nav_diag_test_followup_capture();
+    send_resp_json(fd, "{\"ok\":true,\"action\":\"followup_capture\",\"hint\":\"speak now; transcript appears in serial log\"}");
+}
+
 /* ============================================================
  * Request parser + dispatch
  * ============================================================ */
@@ -787,6 +796,7 @@ static void handle_client(int client_fd) {
         else if (strcmp(path, "/api/test/double_tap") == 0) route_test_double_tap(client_fd);
         else if (strcmp(path, "/api/test/identify") == 0)   route_test_identify(client_fd);
         else if (strcmp(path, "/api/test/play_alert") == 0) route_test_play_alert(client_fd);
+        else if (strcmp(path, "/api/test/followup_capture") == 0) route_test_followup_capture(client_fd);
         else                                             send_404(client_fd);
     }
     else {
