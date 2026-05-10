@@ -16,6 +16,29 @@ OPERATE_RET openai_ask_image(const uint8_t *jpeg_data, uint32_t jpeg_len, const 
 /* text -> PCM audio. Caller must free *out_pcm */
 OPERATE_RET openai_tts(const char *text, uint8_t **out_pcm, uint32_t *out_len);
 
+/* v0.3.6: follow-up Q&A turn with prior conversation history.
+ *
+ * `current_question` is the user's transcribed follow-up text. `language_name`
+ * is one of "English" / "Hindi" / "Spanish" / "Arabic" -- forwarded to the
+ * model so it answers in the same language the user has selected for the
+ * primary mode. `history` is an array of (user, assistant) pairs from prior
+ * turns in the same session, oldest first. Pass NULL/0 if no history.
+ *
+ * The image is included only on the current user turn (not replayed in
+ * history) -- the assistant's prior response in the message list references
+ * what was visible, so context is preserved without re-uploading the JPEG
+ * for every follow-up. Reply is targeted at 1-2 sentences. */
+typedef struct {
+    const char *user;       /* what the user asked (original prompt or transcribed text) */
+    const char *assistant;  /* the assistant's reply on that turn (the SPOKEN line is fine) */
+} openai_turn_t;
+
+OPERATE_RET openai_ask_followup(const uint8_t *jpeg_data, uint32_t jpeg_len,
+                                const char *current_question,
+                                const char *language_name,
+                                const openai_turn_t *history, int history_count,
+                                char **out_text);
+
 /* v0.3.4: streaming TTS. Opens a raw TCP connection to the proxy, sends the
  * /v1/audio/speech POST, reads the response body in fragments and invokes
  * `cb(ctx, chunk_data, chunk_len)` for each fragment as bytes arrive.

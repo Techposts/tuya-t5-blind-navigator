@@ -57,6 +57,7 @@ static const char *state_label(disp_state_t st) {
         case DISP_STATE_IDLE:        return "idle";
         case DISP_STATE_CONNECTING:  return "connecting";
         case DISP_STATE_LISTENING:   return "capturing";
+        case DISP_STATE_FOLLOWUP_LISTEN: return "followup";
         case DISP_STATE_PROCESSING:  return "thinking";
         case DISP_STATE_SPEAKING:    return "speaking";
         case DISP_STATE_ERROR:       return "error";

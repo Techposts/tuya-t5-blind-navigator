@@ -128,24 +128,26 @@ static void s_boot_hide_cb(lv_timer_t *t);  /* CP8: forward decl */
 
 static lv_color_t state_color(disp_state_t st) {
     switch (st) {
-        case DISP_STATE_IDLE:        return COL_IDLE;
-        case DISP_STATE_CONNECTING:  return COL_DIM;
-        case DISP_STATE_LISTENING:   return COL_LISTENING;
-        case DISP_STATE_PROCESSING:  return COL_PROCESSING;
-        case DISP_STATE_SPEAKING:    return COL_SPEAKING;
-        case DISP_STATE_ERROR:       return COL_ERROR;
+        case DISP_STATE_IDLE:             return COL_IDLE;
+        case DISP_STATE_CONNECTING:       return COL_DIM;
+        case DISP_STATE_LISTENING:
+        case DISP_STATE_FOLLOWUP_LISTEN:  return COL_LISTENING;
+        case DISP_STATE_PROCESSING:       return COL_PROCESSING;
+        case DISP_STATE_SPEAKING:         return COL_SPEAKING;
+        case DISP_STATE_ERROR:            return COL_ERROR;
     }
     return COL_DIM;
 }
 
 static const char *state_text(disp_state_t st) {
     switch (st) {
-        case DISP_STATE_IDLE:        return "READY";
-        case DISP_STATE_CONNECTING:  return "CONNECTING";
-        case DISP_STATE_LISTENING:   return "LISTENING";
-        case DISP_STATE_PROCESSING:  return "ANALYZING";
-        case DISP_STATE_SPEAKING:    return "SPEAKING";
-        case DISP_STATE_ERROR:       return "ERROR";
+        case DISP_STATE_IDLE:             return "READY";
+        case DISP_STATE_CONNECTING:       return "CONNECTING";
+        case DISP_STATE_LISTENING:        return "LISTENING";
+        case DISP_STATE_FOLLOWUP_LISTEN:  return "FOLLOW-UP";
+        case DISP_STATE_PROCESSING:       return "ANALYZING";
+        case DISP_STATE_SPEAKING:         return "SPEAKING";
+        case DISP_STATE_ERROR:            return "ERROR";
     }
     return "";
 }
@@ -987,7 +989,9 @@ static void iris_update_arc_anims(disp_state_t st) {
         /* CP9: all timings slowed 1.7-2x for calmer feel per user feedback */
         case DISP_STATE_IDLE:        o_ms=32000; m_ms=48000; i_ms=24000; break;
         case DISP_STATE_CONNECTING:  o_ms=32000; m_ms=48000; i_ms=24000; break;
-        case DISP_STATE_LISTENING:   o_ms=10000; m_ms= 7000; i_ms= 5000; break;
+        case DISP_STATE_LISTENING:
+        case DISP_STATE_FOLLOWUP_LISTEN:
+                                     o_ms=10000; m_ms= 7000; i_ms= 5000; break;
         case DISP_STATE_PROCESSING:  o_ms= 5500; m_ms= 3800; i_ms= 2600; break;
         case DISP_STATE_SPEAKING:    o_ms=20000; m_ms=15000; i_ms=10000; break;
         case DISP_STATE_ERROR:       o_ms=60000; m_ms=60000; i_ms=60000; break;
@@ -1008,7 +1012,7 @@ static void iris_update_arc_anims(disp_state_t st) {
 
     /* CP8: per-state layer visibility -- exactly one layer visible at a time */
     bool is_idle      = (st == DISP_STATE_IDLE);
-    bool is_capture   = (st == DISP_STATE_LISTENING);
+    bool is_capture   = (st == DISP_STATE_LISTENING) || (st == DISP_STATE_FOLLOWUP_LISTEN);
     bool is_thinking  = (st == DISP_STATE_PROCESSING);
     bool is_speaking  = (st == DISP_STATE_SPEAKING);
     bool is_error     = (st == DISP_STATE_ERROR);

@@ -238,8 +238,62 @@ void nav_wifi_forget(void);  /* CP21: defined further down; declared here so btn
  * before they're defined later in the file. */
 extern void nav_settings_get_language(char *out, size_t n);
 static const char *s_active_prompt = NAV_VISION_PROMPT;
+/* v0.3.6: explicit intent tag mirroring s_active_prompt. Comparing
+ * `s_active_prompt == NAV_VISION_PROMPT` is undefined per C standard
+ * (each use of a string-literal macro can be a different pointer) and
+ * fires -Werror=address with the project's strict flags. The enum is
+ * the supported way to identify the current intent without invoking
+ * unspecified-pointer-equality behaviour. */
+typedef enum {
+    NAV_INTENT_NAVIGATE = 0,
+    NAV_INTENT_IDENTIFY,
+    NAV_INTENT_READ,
+} nav_intent_t;
+static nav_intent_t s_active_intent = NAV_INTENT_NAVIGATE;
 /* CP9: last spoken response, kept for double-tap-to-repeat */
 static char s_last_response[1024] = "";
+
+/* ============================================================
+ * v0.3.6: follow-up Q&A session state
+ * ============================================================
+ * History is cleared on every new NAVIGATE / IDENTIFY / READ trigger
+ * (fup_session_reset) and grows turn-by-turn inside the follow-up loop.
+ * Compile-time toggle via IRIS_ENABLE_FOLLOWUP_QA -- flip to 0 to
+ * regression-test that v0.3.6 doesn't disturb the v0.3.5 behaviour. */
+#define IRIS_ENABLE_FOLLOWUP_QA 1
+#define FUP_HISTORY_MAX         2     /* per architecture decision: last 2 turns */
+#define FUP_MAX_TURNS           2     /* offer at most this many follow-ups per session */
+#define FUP_DEAD_ZONE_MS        300   /* let codec drain TTS tail before mic listens */
+
+typedef struct {
+    char user[256];
+    char assistant[768];
+} fup_turn_t;
+
+static fup_turn_t s_fup_history[FUP_HISTORY_MAX];
+static int        s_fup_history_count = 0;
+
+static void fup_session_reset(void) { s_fup_history_count = 0; }
+
+static void fup_history_push(const char *user_q, const char *assistant_a) {
+    if (!user_q || !assistant_a) return;
+    if (s_fup_history_count >= FUP_HISTORY_MAX) {
+        /* drop oldest, shift up by one */
+        for (int i = 0; i < FUP_HISTORY_MAX - 1; i++) {
+            memcpy(&s_fup_history[i], &s_fup_history[i + 1], sizeof(fup_turn_t));
+        }
+        s_fup_history_count = FUP_HISTORY_MAX - 1;
+    }
+    snprintf(s_fup_history[s_fup_history_count].user,
+             sizeof(s_fup_history[0].user), "%s", user_q);
+    snprintf(s_fup_history[s_fup_history_count].assistant,
+             sizeof(s_fup_history[0].assistant), "%s", assistant_a);
+    s_fup_history_count++;
+}
+
+/* Forward declarations -- run_followup_loop is invoked from proc_th below
+ * but defined further down (alongside fup_cap_* it depends on). */
+static void run_followup_loop(uint8_t *jpeg, uint32_t jlen, const char *lang_name);
 static TDL_BUTTON_HANDLE s_btn = NULL;
 static THREAD_HANDLE s_th = NULL;
 static THREAD_HANDLE s_app_th_hdl = NULL;
@@ -511,6 +565,117 @@ static void parse_labeled_response(const char *resp, parsed_resp_t *out) {
     }
 }
 
+/* v0.3.6: run up to FUP_MAX_TURNS follow-up Q&A turns after the initial
+ * IDENTIFY/READ response. Caller passes the still-alive JPEG (proc_th
+ * defers ai_video_jpeg_image_free until after this returns) and the
+ * language name resolved from the active KV setting. Exits early when:
+ *   - user does not speak in the listen window (voiced < 500 ms)
+ *   - tap / swipe / wake-word cancels the session (s_play_interrupt == 1)
+ *   - Whisper or chat round-trip fails
+ *   - FUP_MAX_TURNS reached
+ *
+ * Each iteration: 300 ms dead-zone → FOLLOWUP_LISTEN state → arm capture
+ * → wait for VAD-end or timeout → Whisper transcribe → openai_ask_followup
+ * with prior history → TTS playback. The follow-up answer goes to the
+ * speak-response display in 2 fields (ASKED + ANSWER). */
+static void run_followup_loop(uint8_t *jpeg, uint32_t jlen, const char *lang_name) {
+    if (!IRIS_ENABLE_FOLLOWUP_QA)        return;
+    if (!jpeg || jlen == 0 || !lang_name) return;
+    if (!s_fup_buf)                       return;  /* boot allocator failed */
+
+    for (int turn = 0; turn < FUP_MAX_TURNS; turn++) {
+        if (s_play_interrupt) break;
+
+        /* Dead-zone: codec drains TTS tail before the mic is treated as
+         * "real input". Without this, the last 100-200 ms of speaker
+         * output bleeds into the mic and Whisper transcribes it as
+         * garbage prepended to the user's actual question. */
+        tal_system_sleep(FUP_DEAD_ZONE_MS);
+        if (s_play_interrupt) break;
+
+        nav_display_show_mode_banner("FOLLOW-UP", 0xFFB347);
+        nav_display_set_state(DISP_STATE_FOLLOWUP_LISTEN);
+
+        s_play_interrupt = 0;  /* fresh tap-cancel slot per turn */
+        fup_cap_arm();
+        while (!fup_cap_done() && !s_play_interrupt) tal_system_sleep(50);
+        fup_cap_disarm();
+        if (s_play_interrupt) {
+            PR_NOTICE("[FOLLOWUP] turn %d: cancelled by user input", turn);
+            break;
+        }
+
+        uint32_t pcm_len = s_fup_write;
+        int voiced = s_fup_voiced_ms, peak = s_fup_peak;
+        PR_NOTICE("[FOLLOWUP] turn %d closed: pcm=%u voiced=%d peak=%d (%d%%)",
+                  turn, (unsigned)pcm_len, voiced, peak, peak * 100 / 32767);
+        if (voiced < FUP_CAP_VAD_MIN_VOICED_MS) {
+            PR_NOTICE("[FOLLOWUP] turn %d: no speech (voiced<%d ms) -- end session",
+                      turn, FUP_CAP_VAD_MIN_VOICED_MS);
+            break;
+        }
+        if (peak > 31000) {
+            PR_NOTICE("[FOLLOWUP] WARN clipping (peak=%d/32767)", peak);
+        }
+
+        nav_display_set_state(DISP_STATE_PROCESSING);
+
+        /* Build WAV (header + PCM) for the Whisper upload. PSRAM. */
+        uint8_t *wav = (uint8_t *)tal_psram_malloc(44 + pcm_len);
+        if (!wav) { PR_ERR("[FOLLOWUP] wav alloc failed"); break; }
+        fup_wav_header(wav, pcm_len);
+        memcpy(wav + 44, s_fup_buf, pcm_len);
+
+        char *transcript = NULL;
+        OPERATE_RET r = openai_transcribe(wav, 44 + pcm_len, &transcript);
+        tal_psram_free(wav);
+        if (r != OPRT_OK || !transcript || !transcript[0]) {
+            PR_ERR("[FOLLOWUP] whisper failed (rc=%d)", (int)r);
+            if (transcript) tal_free(transcript);
+            break;
+        }
+        PR_NOTICE("[FOLLOWUP] turn %d transcript: \"%s\"", turn, transcript);
+
+        /* Snapshot prior history into the openai_turn_t shape the chat
+         * call expects. Pointers reference s_fup_history string buffers,
+         * which stay valid for the duration of the call. */
+        openai_turn_t hist_buf[FUP_HISTORY_MAX];
+        for (int i = 0; i < s_fup_history_count; i++) {
+            hist_buf[i].user      = s_fup_history[i].user;
+            hist_buf[i].assistant = s_fup_history[i].assistant;
+        }
+
+        char *answer = NULL;
+        r = openai_ask_followup(jpeg, jlen, transcript, lang_name,
+                                hist_buf, s_fup_history_count, &answer);
+        if (r != OPRT_OK || !answer || !answer[0]) {
+            PR_ERR("[FOLLOWUP] chat failed (rc=%d)", (int)r);
+            tal_free(transcript);
+            if (answer) tal_free(answer);
+            break;
+        }
+        PR_NOTICE("[FOLLOWUP] turn %d answer: \"%s\"", turn, answer);
+
+        /* Push into history BEFORE TTS so a tap-cancel mid-playback still
+         * preserves what was asked + answered for the (possibly never
+         * coming) next turn. */
+        fup_history_push(transcript, answer);
+
+        play_response_kick(answer);
+        nav_display_set_speak_response(
+            "ASKED",  transcript,
+            "",       "",
+            "ANSWER", answer,    /* BIG GREEN hero slot */
+            "",       "");
+        play_response_wait();
+
+        tal_free(transcript);
+        tal_free(answer);
+    }
+    /* Exit: leave state alone -- proc_th's linger + IDLE transition does
+     * the cleanup as if nothing happened. */
+}
+
 static void proc_th(void *arg) {
     /* CP9 state flow: LISTENING during camera capture, PROCESSING during
      * HTTP/LLM, SPEAKING during TTS playback (set inside play_response),
@@ -594,6 +759,28 @@ static void proc_th(void *arg) {
                 pr.labels[2], pr.values[2],
                 pr.labels[3], pr.values[3]);
             play_response_wait();
+
+            /* v0.3.6: follow-up Q&A. Only IDENTIFY / READ get a follow-up
+             * window. NAVIGATE is a one-shot scene-description triggered
+             * by the wake word -- the user is typically moving and the
+             * ambient noise risk outweighs the conversational value.
+             *
+             * Push the just-completed turn into history with a synthetic
+             * user-side question (the model never saw the raw vision
+             * prompt as "user content" -- it was the system contract --
+             * so this short reconstruction is a better stand-in for the
+             * follow-up's prior-context messages array). */
+            if (IRIS_ENABLE_FOLLOWUP_QA &&
+                s_active_intent != NAV_INTENT_NAVIGATE &&
+                jpeg && jlen > 0 && !s_play_interrupt) {
+                const char *initial_q =
+                    (s_active_intent == NAV_INTENT_IDENTIFY) ? "What is this object I'm holding?" :
+                    (s_active_intent == NAV_INTENT_READ)     ? "What does this say?" :
+                                                               "Describe what's in front of me.";
+                fup_history_push(initial_q, spoken);
+                run_followup_loop(jpeg, jlen, lang_name);
+            }
+
             tal_free(resp);
         } else {
             nav_display_set_state(DISP_STATE_ERROR);
@@ -636,7 +823,13 @@ static void touch_tap_trigger(void) {
         /* v0.3.5: during SPEAKING, treat tap as "stop talking and go idle".
          * During LISTENING / PROCESSING / etc. we still ignore the tap to
          * avoid corrupting an in-flight LLM query. */
-        if (nav_display_get_state() == DISP_STATE_SPEAKING) {
+        /* v0.3.6: FOLLOWUP_LISTEN is also interruptible by tap/swipe/wake-word.
+         * Setting s_play_interrupt unblocks the run_followup_loop wait poll;
+         * the loop sees it on the next tick, exits, proc_th does its 4 s
+         * linger and goes IDLE. ai_audio_player_stop is a no-op when nothing
+         * is playing, so calling it unconditionally is safe. */
+        disp_state_t _st_now = nav_display_get_state();
+        if (_st_now == DISP_STATE_SPEAKING || _st_now == DISP_STATE_FOLLOWUP_LISTEN) {
             PR_NOTICE("[BTN] tap during SPEAKING -- interrupting playback");
             s_play_interrupt = 1;
             ai_audio_player_stop(AI_AUDIO_PLAYER_FG);
@@ -650,6 +843,11 @@ static void touch_tap_trigger(void) {
     /* CP9: visible acknowledgement -- show NAVIGATE banner like swipes do */
     nav_display_show_mode_banner("NAVIGATE", 0x4FE3F0);
     s_active_prompt = NAV_VISION_PROMPT;
+    s_active_intent = NAV_INTENT_NAVIGATE;
+    /* v0.3.6: every new NAVIGATE / IDENTIFY / READ trigger starts a fresh
+     * follow-up session. Old history would be stale (a different intent,
+     * possibly a different image / scene) and would only confuse the model. */
+    fup_session_reset();
     s_idle = 0;
     THREAD_CFG_T c = { .stackDepth = 24576, .priority = 3, .thrdname = "proc" };
     tal_thread_create_and_start(&s_th, NULL, NULL, proc_th, NULL, &c);
@@ -659,7 +857,13 @@ static void touch_tap_trigger(void) {
 static void touch_swipe_up_trigger(void) {
     if (!s_idle) {
         /* v0.3.5: any swipe during SPEAKING acts as interrupt, same as tap. */
-        if (nav_display_get_state() == DISP_STATE_SPEAKING) {
+        /* v0.3.6: FOLLOWUP_LISTEN is also interruptible by tap/swipe/wake-word.
+         * Setting s_play_interrupt unblocks the run_followup_loop wait poll;
+         * the loop sees it on the next tick, exits, proc_th does its 4 s
+         * linger and goes IDLE. ai_audio_player_stop is a no-op when nothing
+         * is playing, so calling it unconditionally is safe. */
+        disp_state_t _st_now = nav_display_get_state();
+        if (_st_now == DISP_STATE_SPEAKING || _st_now == DISP_STATE_FOLLOWUP_LISTEN) {
             PR_NOTICE("[GESTURE] swipe-up during SPEAKING -- interrupting playback");
             s_play_interrupt = 1;
             ai_audio_player_stop(AI_AUDIO_PLAYER_FG);
@@ -668,6 +872,11 @@ static void touch_swipe_up_trigger(void) {
     }
     nav_display_show_mode_banner("IDENTIFY", 0xE879F9);
     s_active_prompt = NAV_OBJECT_PROMPT;
+    s_active_intent = NAV_INTENT_IDENTIFY;
+    /* v0.3.6: every new NAVIGATE / IDENTIFY / READ trigger starts a fresh
+     * follow-up session. Old history would be stale (a different intent,
+     * possibly a different image / scene) and would only confuse the model. */
+    fup_session_reset();
     s_idle = 0;
     THREAD_CFG_T c = { .stackDepth = 24576, .priority = 3, .thrdname = "proc" };
     tal_thread_create_and_start(&s_th, NULL, NULL, proc_th, NULL, &c);
@@ -675,7 +884,13 @@ static void touch_swipe_up_trigger(void) {
 
 static void touch_swipe_down_trigger(void) {
     if (!s_idle) {
-        if (nav_display_get_state() == DISP_STATE_SPEAKING) {
+        /* v0.3.6: FOLLOWUP_LISTEN is also interruptible by tap/swipe/wake-word.
+         * Setting s_play_interrupt unblocks the run_followup_loop wait poll;
+         * the loop sees it on the next tick, exits, proc_th does its 4 s
+         * linger and goes IDLE. ai_audio_player_stop is a no-op when nothing
+         * is playing, so calling it unconditionally is safe. */
+        disp_state_t _st_now = nav_display_get_state();
+        if (_st_now == DISP_STATE_SPEAKING || _st_now == DISP_STATE_FOLLOWUP_LISTEN) {
             PR_NOTICE("[GESTURE] swipe-down during SPEAKING -- interrupting playback");
             s_play_interrupt = 1;
             ai_audio_player_stop(AI_AUDIO_PLAYER_FG);
@@ -684,6 +899,11 @@ static void touch_swipe_down_trigger(void) {
     }
     nav_display_show_mode_banner("READ", 0xFFB347);
     s_active_prompt = NAV_READ_PROMPT;
+    s_active_intent = NAV_INTENT_READ;
+    /* v0.3.6: every new NAVIGATE / IDENTIFY / READ trigger starts a fresh
+     * follow-up session. Old history would be stale (a different intent,
+     * possibly a different image / scene) and would only confuse the model. */
+    fup_session_reset();
     s_idle = 0;
     THREAD_CFG_T c = { .stackDepth = 24576, .priority = 3, .thrdname = "proc" };
     tal_thread_create_and_start(&s_th, NULL, NULL, proc_th, NULL, &c);
@@ -729,6 +949,8 @@ static void btn_cb(char *name, TDL_BUTTON_TOUCH_EVENT_E ev, void *arg) {
         if (s_idle && held >= 1000 && held < 2500) {
             nav_display_show_mode_banner("IDENTIFY", 0xE879F9);
             s_active_prompt = NAV_OBJECT_PROMPT;
+            s_active_intent = NAV_INTENT_IDENTIFY;
+            fup_session_reset();   /* v0.3.6: new intent -> stale history clear */
             s_idle = 0;
             THREAD_CFG_T c = { .stackDepth = 24576, .priority = 3, .thrdname = "proc" };
             tal_thread_create_and_start(&s_th, NULL, NULL, proc_th, NULL, &c);
@@ -789,6 +1011,15 @@ static void btn_cb(char *name, TDL_BUTTON_TOUCH_EVENT_E ev, void *arg) {
     }
     nav_display_show_mode_banner(mode_name, mode_col);
     s_active_prompt = p;
+    /* v0.3.6: SINGLE_CLICK -> NAVIGATE (NAV_VISION_PROMPT) and DOUBLE_CLICK
+     * -> READ (NAV_READ_PROMPT). The switch above mapped them, so derive the
+     * matching intent the same way. IDENTIFY is dispatched separately from
+     * PRESS_UP at the 1000-2500 ms hold-and-release window. */
+    s_active_intent = (ev == TDL_BUTTON_PRESS_DOUBLE_CLICK) ? NAV_INTENT_READ : NAV_INTENT_NAVIGATE;
+    /* v0.3.6: every new NAVIGATE / IDENTIFY / READ trigger starts a fresh
+     * follow-up session. Old history would be stale (a different intent,
+     * possibly a different image / scene) and would only confuse the model. */
+    fup_session_reset();
     s_idle = 0;
     THREAD_CFG_T c = { .stackDepth = 24576, .priority = 3, .thrdname = "proc" };
     tal_thread_create_and_start(&s_th, NULL, NULL, proc_th, NULL, &c);

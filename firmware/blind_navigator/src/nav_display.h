@@ -10,6 +10,10 @@ typedef enum {
     DISP_STATE_PROCESSING,
     DISP_STATE_SPEAKING,
     DISP_STATE_ERROR,
+    /* v0.3.6: identical visual to LISTENING (capture screen), but a distinct
+     * state so the input handlers can route taps as "cancel the follow-up
+     * window" instead of falling through to the LISTENING-ignored branch. */
+    DISP_STATE_FOLLOWUP_LISTEN,
 } disp_state_t;
 
 OPERATE_RET nav_display_init(void);

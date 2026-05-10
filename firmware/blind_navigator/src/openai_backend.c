@@ -219,6 +219,109 @@ OPERATE_RET openai_ask_image(const uint8_t *jpeg, uint32_t len, const char *prom
     return (*out) ? OPRT_OK : OPRT_COM_ERROR;
 }
 
+/* ============================================================
+ * v0.3.6: follow-up Q&A with prior-turn history
+ * ============================================================
+ * Builds a chat completions request with:
+ *   1. system message (sets language + 1-2 sentence reply length cap)
+ *   2. for each prior turn in history: user (text-only) + assistant (text)
+ *   3. current user turn: text + image
+ *
+ * The image lives only on the current turn -- the assistant's prior textual
+ * response in the message list keeps the model anchored on what was seen,
+ * so we do not pay the base64 + bandwidth cost of replaying the image on
+ * every follow-up. Verified empirically with gpt-4o-mini: it correctly
+ * reasons about objects in a single image referenced across multi-turn text
+ * exchanges. */
+OPERATE_RET openai_ask_followup(const uint8_t *jpeg, uint32_t jpeg_len,
+                                const char *current_question,
+                                const char *language_name,
+                                const openai_turn_t *history, int history_count,
+                                char **out) {
+    *out = NULL;
+    if (!jpeg || !current_question || !language_name) return OPRT_INVALID_PARM;
+
+    char *b64 = base64_encode_alloc(jpeg, jpeg_len);
+    if (!b64) return OPRT_MALLOC_FAILED;
+    size_t uri_len = strlen("data:image/jpeg;base64,") + strlen(b64) + 1;
+    char *data_uri = (char *)tal_psram_malloc(uri_len);
+    if (!data_uri) { tal_psram_free(b64); return OPRT_MALLOC_FAILED; }
+    snprintf(data_uri, uri_len, "data:image/jpeg;base64,%s", b64);
+    tal_psram_free(b64);
+
+    cJSON *root = cJSON_CreateObject();
+    if (!root) { tal_psram_free(data_uri); return OPRT_MALLOC_FAILED; }
+    cJSON_AddStringToObject(root, "model", "gpt-4o-mini");
+    cJSON *messages = cJSON_AddArrayToObject(root, "messages");
+
+    /* 1. system: language + length cap */
+    {
+        char sys[320];
+        snprintf(sys, sizeof(sys),
+                 "You previously answered a question about this image for a blind person. "
+                 "The user is asking a follow-up. Reply in 1 to 2 conversational sentences in %s. "
+                 "Be specific and use exactly what is visible. Do not say 'I see' or 'the image shows'. "
+                 "If the follow-up cannot be answered from this image, say so briefly.",
+                 language_name);
+        cJSON *m = cJSON_CreateObject();
+        cJSON_AddStringToObject(m, "role", "system");
+        cJSON_AddStringToObject(m, "content", sys);
+        cJSON_AddItemToArray(messages, m);
+    }
+
+    /* 2. history (text-only) -- oldest first */
+    for (int i = 0; i < history_count; i++) {
+        if (history[i].user && history[i].user[0]) {
+            cJSON *u = cJSON_CreateObject();
+            cJSON_AddStringToObject(u, "role", "user");
+            cJSON_AddStringToObject(u, "content", history[i].user);
+            cJSON_AddItemToArray(messages, u);
+        }
+        if (history[i].assistant && history[i].assistant[0]) {
+            cJSON *a = cJSON_CreateObject();
+            cJSON_AddStringToObject(a, "role", "assistant");
+            cJSON_AddStringToObject(a, "content", history[i].assistant);
+            cJSON_AddItemToArray(messages, a);
+        }
+    }
+
+    /* 3. current user turn: text + image */
+    {
+        cJSON *u = cJSON_CreateObject();
+        cJSON_AddStringToObject(u, "role", "user");
+        cJSON *content = cJSON_AddArrayToObject(u, "content");
+        cJSON *text_part = cJSON_CreateObject();
+        cJSON_AddStringToObject(text_part, "type", "text");
+        cJSON_AddStringToObject(text_part, "text", current_question);
+        cJSON_AddItemToArray(content, text_part);
+        cJSON *img_part = cJSON_CreateObject();
+        cJSON_AddStringToObject(img_part, "type", "image_url");
+        cJSON *img_url = cJSON_AddObjectToObject(img_part, "image_url");
+        cJSON_AddStringToObject(img_url, "url", data_uri);
+        cJSON_AddItemToArray(content, img_part);
+        cJSON_AddItemToArray(messages, u);
+    }
+
+    cJSON_AddNumberToObject(root, "max_tokens", 120);
+
+    char *body = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    tal_psram_free(data_uri);
+    if (!body) return OPRT_MALLOC_FAILED;
+
+    uint8_t *rbuf = (uint8_t *)tal_psram_malloc(RESP_BUF_SIZE);
+    if (!rbuf) { cJSON_free(body); return OPRT_MALLOC_FAILED; }
+    const uint8_t *rbody = NULL; size_t rlen = 0;
+    int res = openai_post_json("/v1/chat/completions", body, rbuf, RESP_BUF_SIZE, &rbody, &rlen);
+    if (res == 0 && rbody && rlen > 0) {
+        ((char *)rbuf)[(rlen < RESP_BUF_SIZE) ? rlen : RESP_BUF_SIZE - 1] = 0;
+        *out = extract_chat_text((const char *)rbody);
+    }
+    cJSON_free(body);
+    tal_psram_free(rbuf);
+    return (*out) ? OPRT_OK : OPRT_COM_ERROR;
+}
+
 OPERATE_RET openai_tts(const char *text, uint8_t **out, uint32_t *out_len) {
     *out = NULL;
     if (!text) return OPRT_INVALID_PARM;
