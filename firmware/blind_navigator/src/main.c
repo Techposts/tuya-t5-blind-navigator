@@ -24,6 +24,11 @@
 extern void tkl_log_output(const char *format, ...);
 
 static volatile int s_idle = 1;
+/* v0.3.5: tap-to-interrupt flag. Set by touch_tap_trigger when the user
+ * taps during SPEAKING; cleared at the start of every play_response_kick.
+ * play_response_wait polls it and breaks out of the duration sleep early
+ * so the proc thread can stop the audio + transition to IDLE quickly. */
+static volatile int s_play_interrupt = 0;
 /* v0.3.4 had a `s_kws_ready` flag and tkl_kws_disable/enable calls around TTS
  * playback. Removed in the v0.3.4 hot-fix: chunked streaming alone fixed the
  * codec contention that was causing audio cut-off, so suspending KWS is no
@@ -76,6 +81,7 @@ static void play_response(const char *text) {
     snprintf(s_last_response, sizeof(s_last_response), "%s", text);
     /* CP9: switch to SPEAKING so the audio-bar waveform + green eye + footer show. */
     nav_display_set_state(DISP_STATE_SPEAKING);
+    s_play_interrupt = 0;  /* v0.3.5: clear stale tap interrupt before this round */
     uint8_t *pcm = NULL; uint32_t len = 0;
     if (openai_tts(text, &pcm, &len) == OPRT_OK && pcm) {
         /* OpenAI returns full WAV (RIFF header + PCM payload). Stream as-is. */
@@ -90,9 +96,12 @@ static void play_response(const char *text) {
         if (duration_ms < 1500)  duration_ms = 1500;
         if (duration_ms > 30000) duration_ms = 30000;
         int slept = 0;
-        while (slept < duration_ms) { tal_system_sleep(100); slept += 100; }
+        while (slept < duration_ms) {
+            if (s_play_interrupt) break;
+            tal_system_sleep(100); slept += 100;
+        }
         int tail = 30;
-        while (ai_audio_player_is_playing() && tail--) tal_system_sleep(100);
+        while (!s_play_interrupt && ai_audio_player_is_playing() && tail--) tal_system_sleep(100);
         tal_psram_free(pcm);
     }
 }
@@ -134,6 +143,7 @@ static void play_response_kick(const char *text) {
     snprintf(s_last_response, sizeof(s_last_response), "%s", text);
     nav_display_set_state(DISP_STATE_SPEAKING);
     s_pending_total_bytes = 0;
+    s_play_interrupt = 0;  /* v0.3.5: clear any stale interrupt before this round */
 
     /* v0.3.5: single retry on stream failure / empty response. User
      * reported NAVIGATE/READ produced no audio about 2/3 of the time on
@@ -184,10 +194,16 @@ static void play_response_wait(void) {
               (unsigned)s_pending_total_bytes, duration_ms);
 
     int slept = 0;
-    while (slept < duration_ms) { tal_system_sleep(100); slept += 100; }
+    while (slept < duration_ms) {
+        if (s_play_interrupt) {
+            PR_NOTICE("[AUDIO] wait interrupted by user tap at %d/%d ms", slept, duration_ms);
+            break;
+        }
+        tal_system_sleep(100); slept += 100;
+    }
 
     int tail = 30;
-    while (ai_audio_player_is_playing() && tail--) tal_system_sleep(100);
+    while (!s_play_interrupt && ai_audio_player_is_playing() && tail--) tal_system_sleep(100);
 
     s_pending_total_bytes = 0;
 }
@@ -364,7 +380,21 @@ static void proc_th(void *arg) {
 
 
 static void touch_tap_trigger(void) {
-    if (!s_idle) return;
+    if (!s_idle) {
+        /* v0.3.5: during SPEAKING, treat tap as "stop talking and go idle".
+         * During LISTENING / PROCESSING / etc. we still ignore the tap to
+         * avoid corrupting an in-flight LLM query. */
+        if (nav_display_get_state() == DISP_STATE_SPEAKING) {
+            PR_NOTICE("[BTN] tap during SPEAKING -- interrupting playback");
+            s_play_interrupt = 1;
+            ai_audio_player_stop(AI_AUDIO_PLAYER_FG);
+            /* The proc-thread wait loop sees s_play_interrupt next tick,
+             * exits early, transitions to IDLE, and clears s_idle. We do
+             * not directly touch s_idle here -- letting the owning thread
+             * wind down keeps the state machine consistent. */
+        }
+        return;
+    }
     /* CP9: visible acknowledgement -- show NAVIGATE banner like swipes do */
     nav_display_show_mode_banner("NAVIGATE", 0x4FE3F0);
     s_active_prompt = NAV_VISION_PROMPT;
