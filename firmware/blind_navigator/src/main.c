@@ -24,6 +24,12 @@
 extern void tkl_log_output(const char *format, ...);
 
 static volatile int s_idle = 1;
+/* v0.3.4: KWS engine state. Set true once tkl_kws_init() has been called and
+ * the wakeup callback is registered. play_response_kick/wait check this so
+ * they only suspend/resume KWS when it's actually running. Without this guard
+ * we'd call tkl_kws_disable() during nav_announce_welcome (which now runs
+ * before the KWS engine is up) and crash. */
+static volatile int s_kws_ready = 0;
 /* CP12d: forward decl so wake_word_cb can fire NAVIGATE */
 static void touch_tap_trigger(void);
 void nav_wifi_forget(void);  /* CP21: defined further down; declared here so btn_cb can call it */
@@ -39,6 +45,11 @@ static void play_response(const char *text) {
     if (!text) return;
     /* CP9: snapshot last response for double-tap replay. Truncate at buf-1. */
     snprintf(s_last_response, sizeof(s_last_response), "%s", text);
+    /* v0.3.4: suspend KWS while we play. The Wanson engine continuously consumes
+     * I2S input on the same codec/lanes our output uses; v0.3.3 testing showed
+     * audio cutting off mid-sentence and falling silent unpredictably. Resume
+     * after playback so wake-word detection comes back. */
+    if (s_kws_ready) tkl_kws_disable();
     /* CP9: switch to SPEAKING so the audio-bar waveform + green eye + footer show. */
     nav_display_set_state(DISP_STATE_SPEAKING);
     uint8_t *pcm = NULL; uint32_t len = 0;
@@ -47,9 +58,20 @@ static void play_response(const char *text) {
         ai_audio_play_tts_stream(AI_AUDIO_PLAYER_TTS_START, AI_AUDIO_CODEC_WAV, NULL, 0);
         ai_audio_play_tts_stream(AI_AUDIO_PLAYER_TTS_DATA, AI_AUDIO_CODEC_WAV, (char*)pcm, len);
         ai_audio_play_tts_stream(AI_AUDIO_PLAYER_TTS_STOP, AI_AUDIO_CODEC_WAV, NULL, 0);
+        /* v0.3.4: duration-based wait. is_playing flaps false between chunk
+         * transitions; trusting it cuts off audio mid-sentence. Sleep the
+         * expected PCM duration, then poll briefly as a tail guard. */
+        uint32_t bytes = len > 44 ? len - 44 : 0;
+        int duration_ms = (int)(bytes / 32);
+        if (duration_ms < 1500)  duration_ms = 1500;
+        if (duration_ms > 30000) duration_ms = 30000;
+        int slept = 0;
+        while (slept < duration_ms) { tal_system_sleep(100); slept += 100; }
+        int tail = 30;
+        while (ai_audio_player_is_playing() && tail--) tal_system_sleep(100);
         tal_psram_free(pcm);
-        int timeout = 200; while(ai_audio_player_is_playing() && timeout--) tal_system_sleep(100);
     }
+    if (s_kws_ready) tkl_kws_enable();
 }
 
 /* CP23 split: kick audio + populate display + wait. Used when caller wants to
@@ -57,24 +79,108 @@ static void play_response(const char *text) {
  * before-or-after. Returns from kick once audio is queued (TTS download done,
  * 2-3s); audio plays in the background while display updates; then caller
  * calls wait to block until playback finishes. */
-static uint8_t  *s_pending_pcm = NULL;
+/* v0.3.5 chunked streaming.
+ *
+ * The legacy openai_tts() pulled the entire WAV into a 128 KB buffer
+ * before any DATA call, adding 3-5 s of perceived latency before audio
+ * started, and forcing the player to swallow the whole payload in one
+ * call (which cut off mid-sentence when the ring buffer overflowed).
+ *
+ * The new path streams: each TCP recv chunk is fed straight into
+ * ai_audio_play_tts_stream(DATA, ...) as it arrives. The player begins
+ * playback at the first chunk (~500 ms after the request goes out) and
+ * the application doesn't have to hold the full WAV anywhere -- per-call
+ * memory is ~6 KB regardless of audio length.
+ *
+ * play_response_wait still uses duration-based wait, but the duration is
+ * computed from the running byte counter (s_pending_total_bytes) that
+ * the chunk callback maintains. */
+static uint32_t s_pending_total_bytes = 0;
+
+static int on_tts_chunk(void *ctx, const uint8_t *data, size_t len) {
+    (void)ctx;
+    if (len == 0) return 0;
+    /* Forward straight to player. The player's ring buffer absorbs the
+     * chunk and renders it immediately; first chunk = first audio out. */
+    ai_audio_play_tts_stream(AI_AUDIO_PLAYER_TTS_DATA, AI_AUDIO_CODEC_WAV, (char*)data, (uint32_t)len);
+    s_pending_total_bytes += (uint32_t)len;
+    return 0;  /* keep streaming */
+}
+
 static void play_response_kick(const char *text) {
+    /* v0.3.4: suspend KWS so its continuous I2S input doesn't compete with our
+     * output during the TTS stream. wait() re-enables. */
+    if (s_kws_ready) tkl_kws_disable();
     snprintf(s_last_response, sizeof(s_last_response), "%s", text);
     nav_display_set_state(DISP_STATE_SPEAKING);
-    uint32_t len = 0;
-    if (openai_tts(text, &s_pending_pcm, &len) == OPRT_OK && s_pending_pcm) {
-        ai_audio_play_tts_stream(AI_AUDIO_PLAYER_TTS_START, AI_AUDIO_CODEC_WAV, NULL, 0);
-        ai_audio_play_tts_stream(AI_AUDIO_PLAYER_TTS_DATA, AI_AUDIO_CODEC_WAV, (char*)s_pending_pcm, len);
-        ai_audio_play_tts_stream(AI_AUDIO_PLAYER_TTS_STOP, AI_AUDIO_CODEC_WAV, NULL, 0);
-        /* return now -- caller updates display; we'll free + wait later */
+    s_pending_total_bytes = 0;
+
+    /* v0.3.5: single retry on stream failure / empty response. User
+     * reported NAVIGATE/READ produced no audio about 2/3 of the time on
+     * first attempt while welcome (which runs from a different thread on
+     * a fresh TCP socket) worked reliably. Retry covers transient
+     * proxy-side timing or socket reuse issues without masking persistent
+     * faults. */
+    ai_audio_play_tts_stream(AI_AUDIO_PLAYER_TTS_START, AI_AUDIO_CODEC_WAV, NULL, 0);
+    OPERATE_RET rt = openai_tts_stream(text, on_tts_chunk, NULL);
+    if (rt != OPRT_OK || s_pending_total_bytes == 0) {
+        PR_ERR("[AUDIO] tts_stream attempt 1 failed: rt=%d bytes=%u, retrying once",
+               (int)rt, (unsigned)s_pending_total_bytes);
+        s_pending_total_bytes = 0;
+        tal_system_sleep(200);  /* let proxy / socket settle */
+        rt = openai_tts_stream(text, on_tts_chunk, NULL);
     }
+    ai_audio_play_tts_stream(AI_AUDIO_PLAYER_TTS_STOP, AI_AUDIO_CODEC_WAV, NULL, 0);
+    if (rt != OPRT_OK) {
+        PR_ERR("[AUDIO] tts_stream still failed after retry: rt=%d bytes=%u",
+               (int)rt, (unsigned)s_pending_total_bytes);
+    }
+    /* return now -- caller updates display; wait() blocks for playback drain */
 }
 static void play_response_wait(void) {
-    if (!s_pending_pcm) return;
-    int timeout = 200;
-    while (ai_audio_player_is_playing() && timeout--) tal_system_sleep(100);
-    tal_psram_free(s_pending_pcm);
-    s_pending_pcm = NULL;
+    if (s_pending_total_bytes == 0) {
+        /* Stream produced no body -- TTS request failed. Re-enable KWS so
+         * we don't go permanently deaf to wake word after one TTS error. */
+        if (s_kws_ready) tkl_kws_enable();
+        return;
+    }
+
+    /* v0.3.5: with chunked streaming, DATA chunks arrived continuously over
+     * the network transfer (~3 s for typical responses), so by the time we
+     * reach this wait the player has already been draining for that long.
+     * The is_playing flag is also more reliable now (smaller chunks, no
+     * single large submit that the player has to swallow at once).
+     *
+     * Use silence-debounce with a tight 300 ms window (was 800 ms in the
+     * pre-streaming attempt). Bound by total expected audio duration plus
+     * 2 s margin so a stuck player can't lock us forever. WAV header is
+     * 44 B; 32 bytes/ms at 16 kHz mono 16-bit. */
+    uint32_t bytes = s_pending_total_bytes > 44 ? s_pending_total_bytes - 44 : 0;
+    int audio_ms = (int)(bytes / 32);
+    int max_ms = audio_ms + 2000;
+    if (max_ms < 2000)  max_ms = 2000;
+    if (max_ms > 30000) max_ms = 30000;
+    PR_NOTICE("[AUDIO] wait: streamed=%u audio_ms=%d max_ms=%d",
+              (unsigned)s_pending_total_bytes, audio_ms, max_ms);
+
+    /* Small grace so a STOP-then-immediate-poll doesn't catch the player
+     * in a transient "no data queued" state right after the last DATA. */
+    tal_system_sleep(150);
+    int total = 150;
+    int silent_streak = 0;
+    while (total < max_ms) {
+        if (ai_audio_player_is_playing()) {
+            silent_streak = 0;
+        } else if (++silent_streak >= 3) {
+            break;  /* 300 ms consecutive silence -- truly done */
+        }
+        tal_system_sleep(100);
+        total += 100;
+    }
+    PR_NOTICE("[AUDIO] wait done: total=%d max=%d", total, max_ms);
+
+    s_pending_total_bytes = 0;
+    if (s_kws_ready) tkl_kws_enable();
 }
 
 /* CP9: replay the last response without re-querying the LLM. Used for
@@ -453,22 +559,37 @@ void nav_diag_play_test_alert(void) {
     s_idle = 1;
 }
 
-/* v0.3.3: brief on-connect introduction. Played once after Wi-Fi station
- * connect succeeds and the audio chain is up. Tells a first-time user what
- * the device is and how to drive it. Synchronous: blocks the boot thread
- * for ~5 s while TTS downloads + plays. The boot thread already takes
- * 10-15 s, so the extra delay is acceptable for a one-time intro. */
-static void nav_announce_welcome(void) {
+/* v0.3.4: brief on-connect introduction. Runs on its own thread so the boot
+ * thread can finish (start KWS, register buttons, set IDLE state) without
+ * waiting on the TTS download + playback (~5 s). v0.3.3 ran this synchronously
+ * and that blocked LVGL refresh + the web UI accept loop, making the device
+ * feel frozen for the first 5-10 s after connect. */
+static THREAD_HANDLE s_welcome_th = NULL;
+static void announce_welcome_th(void *arg) {
+    (void)arg;
+    /* Small delay so the IDLE display + LVGL refresh + web UI accept loop all
+     * settle before we yank the codec into SPEAKING state for the intro. */
+    tal_system_sleep(2000);
     static const char *intro =
         "I am IRIS, your vision co-pilot. "
         "Tap once to navigate, twice to read text, "
         "long press the button to identify objects.";
-    PR_NOTICE("[BOOT] announcing welcome via TTS");
+    PR_NOTICE("[BOOT] announcing welcome via TTS (background)");
     s_idle = 0;
     play_response_kick(intro);
     play_response_wait();
     nav_display_set_state(DISP_STATE_IDLE);
     s_idle = 1;
+    THREAD_HANDLE self = s_welcome_th;
+    s_welcome_th = NULL;
+    tal_thread_delete(self);
+}
+static void nav_announce_welcome(void) {
+    /* v0.3.4: 16 KB stack. Earlier 24 KB bump appeared to trigger task-heap
+     * exhaustion (welcome thread crashed mid-playback). Stay at 16 KB and
+     * watch serial for any actual stack-overflow trap. */
+    THREAD_CFG_T c = { .stackDepth = 16384, .priority = 4, .thrdname = "welcome" };
+    tal_thread_create_and_start(&s_welcome_th, NULL, NULL, announce_welcome_th, NULL, &c);
 }
 
 /* ============================================================
@@ -673,6 +794,7 @@ static void nav_clock_update(TIMER_ID timer_id, void *arg) {
 #define NAV_KV_VOICE       "set.voice"
 #define NAV_KV_LANGUAGE    "set.lang"
 #define NAV_KV_WAKE_FB     "set.wakefb"
+#define NAV_KV_ROTATE_180  "set.rot180"  /* v0.3.4: 180-degree screen rotation toggle */
 
 static int nav_kv_get_int(const char *key, int def) {
     uint8_t *val = NULL; size_t len = 0;
@@ -712,6 +834,7 @@ static void nav_kv_set_str(const char *key, const char *v) {
 int  nav_settings_get_volume(void)     { return nav_kv_get_int(NAV_KV_VOLUME, 70); }
 int  nav_settings_get_brightness(void) { return nav_kv_get_int(NAV_KV_BRIGHTNESS, 80); }
 int  nav_settings_get_wake_feedback(void) { return nav_kv_get_int(NAV_KV_WAKE_FB, 0); }
+int  nav_settings_get_rotate_180(void) { return nav_kv_get_int(NAV_KV_ROTATE_180, 0); }
 void nav_settings_get_voice(char *out, size_t n)    { nav_kv_get_str(NAV_KV_VOICE, out, n, "MID"); }
 void nav_settings_get_language(char *out, size_t n) { nav_kv_get_str(NAV_KV_LANGUAGE, out, n, "EN"); }
 
@@ -740,6 +863,9 @@ void nav_settings_set_brightness(int v) {
     if (disp) tdl_disp_set_brightness(disp, (uint8_t)v);
 }
 void nav_settings_set_wake_feedback(int v) { nav_kv_set_int(NAV_KV_WAKE_FB, v ? 1 : 0); }
+/* v0.3.4: rotate_180 takes effect on next reboot. Caller (web UI) should
+ * trigger tal_system_reset() shortly after this returns so the value applies. */
+void nav_settings_set_rotate_180(int v) { nav_kv_set_int(NAV_KV_ROTATE_180, v ? 1 : 0); }
 void nav_settings_set_voice(const char *s)    { nav_kv_set_str(NAV_KV_VOICE, s); }
 void nav_settings_set_language(const char *s) { nav_kv_set_str(NAV_KV_LANGUAGE, s); }
 
@@ -915,6 +1041,10 @@ void nav_app_main(void) {
      * detection loop, so wake_count stays at 0. */
     tkl_kws_init();
     tkl_kws_reg_wakeup_cb(wake_word_cb);
+    /* v0.3.4: flip the ready flag so play_response{,_kick,_wait} now
+     * suspend/resume KWS around TTS playback. Before this point any
+     * tkl_kws_disable() call would crash. */
+    s_kws_ready = 1;
 
     
     nav_display_set_state(DISP_STATE_IDLE);

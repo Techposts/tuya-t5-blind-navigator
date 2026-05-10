@@ -2,11 +2,14 @@
 #include "nav_config.h"
 #include "tal_log.h"
 #include "tal_memory.h"
+#include "tal_network.h"
+#include "tal_system.h"
 #include "http_client_interface.h"
 #include "cJSON.h"
 #include "mbedtls/base64.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #define RESP_BUF_SIZE (128 * 1024)
 
@@ -150,4 +153,163 @@ OPERATE_RET openai_tts(const char *text, uint8_t **out, uint32_t *out_len) {
     }
     tal_psram_free(rbuf);
     return (*out) ? OPRT_OK : OPRT_COM_ERROR;
+}
+
+/* ============================================================
+ * Streaming TTS over raw TCP (v0.3.4 / v0.3.5)
+ * ============================================================
+ * The synchronous openai_tts() above downloads the entire WAV before any
+ * audio plays. For a 10 s welcome that's 3-5 s perceived latency before
+ * any sound + a fixed-size response buffer that has to hold the whole
+ * payload (~320 KB).
+ *
+ * openai_tts_stream() opens a raw TCP socket to the Flask proxy, writes
+ * the HTTP/1.1 POST manually, parses just enough response headers to find
+ * the body, then forwards each recv() chunk to the caller's callback.
+ * Per-call memory: ~6 KB (one recv buffer + small header buffer),
+ * independent of audio length. Audio starts playing within ~500 ms of
+ * the first chunk arriving instead of waiting for the full download. */
+
+#define TTS_STREAM_RECV_BUF  4096
+#define TTS_STREAM_HDR_BUF   2048
+
+static int parse_status_code(const char *line) {
+    /* "HTTP/1.1 200 OK\r\n" -> 200 */
+    const char *sp = strchr(line, ' ');
+    if (!sp) return -1;
+    return atoi(sp + 1);
+}
+
+OPERATE_RET openai_tts_stream(const char *text, openai_tts_chunk_cb cb, void *ctx) {
+    if (!text || !cb) return OPRT_INVALID_PARM;
+
+    /* Build JSON body via cJSON so quotes / newlines are escaped. */
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return OPRT_MALLOC_FAILED;
+    cJSON_AddStringToObject(root, "model",  "gpt-4o-mini-tts");
+    cJSON_AddStringToObject(root, "input",  text);
+    cJSON_AddStringToObject(root, "voice",  "alloy");
+    cJSON_AddStringToObject(root, "response_format", "wav");
+    char *body = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!body) return OPRT_MALLOC_FAILED;
+    int body_len = (int)strlen(body);
+
+    /* NAV_PROXY_HOST is an IP literal so str2addr suffices -- no DNS. */
+    int fd = tal_net_socket_create(PROTOCOL_TCP);
+    if (fd < 0) { cJSON_free(body); return OPRT_COM_ERROR; }
+
+    TUYA_IP_ADDR_T addr = tal_net_str2addr(NAV_PROXY_HOST);
+    if (tal_net_connect(fd, addr, NAV_PROXY_PORT) != 0) {
+        PR_ERR("[TTS-STREAM] connect %s:%d failed", NAV_PROXY_HOST, (int)NAV_PROXY_PORT);
+        tal_net_close(fd);
+        cJSON_free(body);
+        return OPRT_COM_ERROR;
+    }
+
+    /* Connection: close so the proxy signals EOF by closing the socket --
+     * simpler than parsing chunked transfer encoding or tracking
+     * Content-Length on receive. Flask's default response uses
+     * Content-Length, but Connection: close is honored either way.
+     *
+     * v0.3.5 fix: build the entire request (headers + body) in a single
+     * buffer and write with one tal_net_send call. Splitting into two
+     * sends caused intermittent failures where Flask's HTTP parser saw
+     * the headers, decided the request was malformed (no body yet
+     * within its read window), and rejected. */
+    int req_cap = 256 + body_len;
+    char *req = (char *)tal_malloc(req_cap);
+    if (!req) { tal_net_close(fd); cJSON_free(body); return OPRT_MALLOC_FAILED; }
+    int req_len = snprintf(req, req_cap,
+        "POST /v1/audio/speech HTTP/1.1\r\n"
+        "Host: %s:%d\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %d\r\n"
+        "Connection: close\r\n"
+        "\r\n%s",
+        NAV_PROXY_HOST, (int)NAV_PROXY_PORT, body_len, body);
+    cJSON_free(body);
+    int sent = tal_net_send(fd, req, req_len);
+    tal_free(req);
+    if (sent != req_len) {
+        PR_ERR("[TTS-STREAM] send failed: sent=%d expected=%d", sent, req_len);
+        tal_net_close(fd);
+        return OPRT_COM_ERROR;
+    }
+
+    /* Phase 1: read until end-of-headers ("\r\n\r\n"). */
+    uint8_t *recv_buf = (uint8_t *)tal_malloc(TTS_STREAM_RECV_BUF);
+    if (!recv_buf) { tal_net_close(fd); return OPRT_MALLOC_FAILED; }
+    char hdr_buf[TTS_STREAM_HDR_BUF];
+    int hdr_used = 0;
+    int status = -1;
+    int total_body = 0;
+
+    while (1) {
+        int n = tal_net_recv(fd, recv_buf, TTS_STREAM_RECV_BUF);
+        if (n <= 0) {
+            PR_ERR("[TTS-STREAM] recv during headers returned %d", n);
+            tal_free(recv_buf);
+            tal_net_close(fd);
+            return OPRT_COM_ERROR;
+        }
+        int can_take = (int)sizeof(hdr_buf) - hdr_used - 1;
+        int take = (n < can_take) ? n : can_take;
+        if (take <= 0) { tal_free(recv_buf); tal_net_close(fd); return OPRT_COM_ERROR; }
+        memcpy(hdr_buf + hdr_used, recv_buf, take);
+        hdr_used += take;
+        hdr_buf[hdr_used] = 0;
+
+        char *body_start = strstr(hdr_buf, "\r\n\r\n");
+        if (!body_start) continue;  /* keep reading */
+
+        status = parse_status_code(hdr_buf);
+        if (status != 200) {
+            PR_ERR("[TTS-STREAM] HTTP status %d", status);
+            tal_free(recv_buf);
+            tal_net_close(fd);
+            return OPRT_COM_ERROR;
+        }
+        int header_len = (int)(body_start - hdr_buf) + 4;
+        /* Body bytes captured along with headers in hdr_buf. */
+        int body_in_hdr = hdr_used - header_len;
+        if (body_in_hdr > 0) {
+            if (cb(ctx, (const uint8_t *)(hdr_buf + header_len), (size_t)body_in_hdr) != 0) {
+                tal_free(recv_buf); tal_net_close(fd); return OPRT_COM_ERROR;
+            }
+            total_body += body_in_hdr;
+        }
+        /* Any body bytes still sitting in recv_buf beyond `take`. */
+        int body_in_recv = n - take;
+        if (body_in_recv > 0) {
+            if (cb(ctx, recv_buf + take, (size_t)body_in_recv) != 0) {
+                tal_free(recv_buf); tal_net_close(fd); return OPRT_COM_ERROR;
+            }
+            total_body += body_in_recv;
+        }
+        break;
+    }
+
+    /* Phase 2: pure body streaming until socket close. */
+    PR_NOTICE("[TTS-STREAM] headers ok (status %d), streaming body", status);
+    while (1) {
+        int n = tal_net_recv(fd, recv_buf, TTS_STREAM_RECV_BUF);
+        if (n == 0) break;       /* clean EOF */
+        if (n < 0) {
+            PR_ERR("[TTS-STREAM] recv error %d after %d body bytes", n, total_body);
+            tal_free(recv_buf);
+            tal_net_close(fd);
+            return OPRT_COM_ERROR;
+        }
+        total_body += n;
+        if (cb(ctx, recv_buf, (size_t)n) != 0) {
+            PR_NOTICE("[TTS-STREAM] caller aborted at %d body bytes", total_body);
+            break;
+        }
+    }
+    PR_NOTICE("[TTS-STREAM] done, %d body bytes", total_body);
+
+    tal_free(recv_buf);
+    tal_net_close(fd);
+    return (total_body > 0) ? OPRT_OK : OPRT_COM_ERROR;
 }
