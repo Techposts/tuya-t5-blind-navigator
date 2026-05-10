@@ -716,25 +716,65 @@ static void proc_th(void *arg) {
         if      (strcmp(lang_code, "HI") == 0) lang_name = "Hindi";
         else if (strcmp(lang_code, "ES") == 0) lang_name = "Spanish";
         else if (strcmp(lang_code, "AR") == 0) lang_name = "Arabic";
-        char prompt_buf[1792];
+        char prompt_buf[2048];
         /* v0.3.5: prompt now also has explicit anti-hallucination grounding.
-         * User reported the LLM occasionally falling back to generic
-         * descriptions ("wall ahead, go ahead and...") when the camera
-         * was clearly pointing at a face or object. Force the model to
-         * commit to what's literally visible OR to confess if image is
-         * unusable -- much better than confabulation. */
+         * v0.3.6 fix: the v0.3.5 grounding block hardcoded NAVIGATE-mode
+         * labels (PATH STATUS / WHERE / ACTION / WHY) and was appended to
+         * EVERY intent's prompt. IDENTIFY (whose schema is OBJECT / DETAIL /
+         * SAFETY / FOLLOWUP) and READ (TYPE / TEXT / NOTE / FOLLOWUP) saw a
+         * contradictory schema in the addendum and fell back to whatever
+         * "Unclear" path their own base prompt offered -- which is why
+         * IDENTIFY "always says not clear". Each intent now gets its own
+         * grounding variant tuned to its actual failure mode:
+         *   - NAVIGATE: bail to UNCLEAR when scene is genuinely unreadable
+         *   - IDENTIFY: tolerate slight softness from close-up holding;
+         *               only bail when frame is empty / object < 1/8 of
+         *               frame; force specificity ("green apple", not "fruit")
+         *   - READ:     read partial text rather than giving up; only bail
+         *               when there is genuinely no text. */
+        const char *grounding_extra;
+        const char *spoken_label_hint;
+        if (s_active_intent == NAV_INTENT_IDENTIFY) {
+            grounding_extra =
+                "Objects held close to the camera often appear soft or "
+                "partially out of frame -- this is normal, do NOT default "
+                "to 'Unclear' for slight softness. Identify the object based "
+                "on color, shape, material, and visible detail. Be specific "
+                "(say 'green apple' not 'fruit', 'plastic water bottle' not "
+                "'container', 'twenty rupee note' not 'money'). Only set "
+                "OBJECT to 'Unclear' if the frame is completely black, the "
+                "object fills less than one-eighth of the frame, or you "
+                "genuinely cannot see any identifying features. Do not "
+                "invent details you cannot see.";
+            spoken_label_hint = "the structured fields (OBJECT, DETAIL, SAFETY, FOLLOWUP)";
+        } else if (s_active_intent == NAV_INTENT_READ) {
+            grounding_extra =
+                "Read text exactly as printed. If text is partially visible "
+                "at the edges, read what you can and note the cutoff in NOTE. "
+                "Read currency denominations as words and flag expiry dates. "
+                "Read medication labels with drug name, strength, and any "
+                "warning. Only set TYPE to 'None' and TEXT to 'No readable "
+                "text in view' if the frame genuinely contains no readable "
+                "characters -- not just because the text is small, tilted, "
+                "or in a non-English script. Do not invent text that is not "
+                "actually visible.";
+            spoken_label_hint = "the structured fields (TYPE, TEXT, NOTE, FOLLOWUP)";
+        } else { /* NAV_INTENT_NAVIGATE */
+            grounding_extra =
+                "Describe ONLY what is literally visible. If the image is "
+                "dark, blurry, blank, or out of focus, set PATH STATUS to "
+                "UNCLEAR and WHERE to 'Image quality poor - cannot describe "
+                "scene'. Do not invent objects, walls, or people that you "
+                "are not directly observing. Mention specific colors, "
+                "textures, and arrangements you can actually see.";
+            spoken_label_hint = "the structured fields (PATH STATUS, WHERE, ACTION, WHY)";
+        }
         snprintf(prompt_buf, sizeof(prompt_buf),
                  "%s\n\n"
-                 "GROUNDING: Describe ONLY what is literally visible in this "
-                 "image. If the image is dark, blurry, blank, or out of focus, "
-                 "set PATH STATUS to UNCLEAR and WHERE to 'Image quality poor "
-                 "- cannot describe scene'. Do not invent objects, walls, or "
-                 "people that you are not directly observing. Mention specific "
-                 "colors, textures, and arrangements you can actually see.\n\n"
-                 "IMPORTANT: Write the SPOKEN line in %s. Keep the other "
-                 "fields (PATH STATUS, WHERE, ACTION, WHY) in English for the "
-                 "display.",
-                 s_active_prompt, lang_name);
+                 "GROUNDING: %s\n\n"
+                 "IMPORTANT: Write the SPOKEN line in %s. Keep %s in English "
+                 "for the display.",
+                 s_active_prompt, grounding_extra, lang_name, spoken_label_hint);
         PR_NOTICE("[LANG] language=%s, prompt_len=%d", lang_name, (int)strlen(prompt_buf));
 
         char *resp = NULL;
