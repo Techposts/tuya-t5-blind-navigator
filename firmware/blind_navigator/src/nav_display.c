@@ -148,18 +148,14 @@ OPERATE_RET nav_display_init(void) {
     lv_vendor_start(THREAD_PRIO_0, 1024 * 8);
     lv_vendor_disp_lock();
 
-    /* v0.3.4: read the persisted rotate-180 toggle from KV and apply it before
-     * any widget creation. LVGL handles the framebuffer rotation; widget
-     * coords stay at LV_HOR_RES x LV_VER_RES. Touch coordinate flipping is
-     * not yet handled (pending follow-up in v0.3.5) -- if a user enables this
-     * and notices touch is mirrored, that's the gap. */
-    {
-        extern int nav_settings_get_rotate_180(void);
-        if (nav_settings_get_rotate_180()) {
-            lv_display_t *disp = lv_display_get_default();
-            if (disp) lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_180);
-        }
-    }
+    /* v0.3.4 had a `lv_display_set_rotation(LV_DISPLAY_ROTATION_180)` block
+     * here, gated on a KV flag. Removed in the v0.3.4 hot-fix because it
+     * caused a UsageFault (unaligned access) on the lvgl thread shortly
+     * after boot -- lv_display_get_default() returned a pointer that the
+     * LVGL render loop then dereferenced unsafely. The Tuya LVGL wrapper
+     * appears to set up the default display *asynchronously* after
+     * lv_vendor_start, so calling get_default() at this point is too
+     * early. Re-introduce in v0.3.5 with a deferred init path. */
 
     int W = LV_HOR_RES, H = LV_VER_RES;
     int eye_size = (W < H ? W : H) * 55 / 100;

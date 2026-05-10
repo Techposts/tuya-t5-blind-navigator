@@ -30,8 +30,6 @@ extern void nav_wifi_forget(void);  /* CP21: clear KV creds + arm force_ap */
 extern int  nav_settings_get_volume(void);
 extern int  nav_settings_get_brightness(void);
 extern int  nav_settings_get_wake_feedback(void);
-extern int  nav_settings_get_rotate_180(void);
-extern void nav_settings_set_rotate_180(int v);
 extern void nav_settings_get_voice(char *out, size_t n);
 extern void nav_settings_get_language(char *out, size_t n);
 extern void nav_settings_set_volume(int v);
@@ -408,7 +406,9 @@ static void route_settings(int fd) {
     int vol = nav_settings_get_volume();
     int bri = nav_settings_get_brightness();
     int wakefb = nav_settings_get_wake_feedback();
-    int rot180 = nav_settings_get_rotate_180();
+    /* v0.3.4 hot-fix: rotation toggle UI removed from /settings -- it was
+     * implicated in the web-UI reboot regression. KV accessors stay; the
+     * UI will be re-introduced cleanly in v0.3.5. */
 
     static char page[8192];
     snprintf(page, sizeof(page),
@@ -445,13 +445,6 @@ static void route_settings(int fd) {
         "<h2>Display</h2>"
         "<label>BRIGHTNESS (%d%%)</label>"
         "<input name=brightness type=range min=10 max=100 step=5 value=%d oninput='this.previousElementSibling.textContent=`BRIGHTNESS (${this.value}%%)`'>"
-        /* v0.3.4: 180-degree rotation toggle. Saves to KV + reboots so the */
-        /* LVGL display orientation re-applies on next boot. */
-        "<label style='margin-top:14px'>SCREEN ROTATION</label>"
-        "<select name=rot180 onchange=\"if(confirm('Save and restart device to apply rotation?')){fetch('/api/settings/rotate?v='+this.value,{method:'POST'}).then(()=>{toast('rotating ... restarting');setTimeout(function(){location.href='/'},1500);}).catch(()=>toast('save failed',1));}else{this.value=%d;}\">"
-        "<option value=0%s>NORMAL (0\xc2\xb0)</option>"
-        "<option value=1%s>FLIPPED (180\xc2\xb0)</option>"
-        "</select>"
         "</div>"
         "<div class=card>"
         "<h2>Language</h2>"
@@ -511,9 +504,6 @@ static void route_settings(int fd) {
         strcmp(voice, "MID") == 0 ? " selected" : "",
         strcmp(voice, "HI") == 0 ? " selected" : "",
         bri, bri,
-        rot180,  /* JS uses this to revert the select if user cancels confirm() */
-        rot180 == 0 ? " selected" : "",
-        rot180 == 1 ? " selected" : "",
         strcmp(lang, "EN") == 0 ? " selected" : "",
         strcmp(lang, "ES") == 0 ? " selected" : "",
         strcmp(lang, "HI") == 0 ? " selected" : "",
@@ -546,22 +536,6 @@ static void route_settings_save(int fd, const char *body, bool ajax) {
             "Location: /settings?saved=1\r\n"
             "Connection: close\r\n\r\n");
     }
-}
-
-/* v0.3.4: dedicated rotate-180 endpoint. Saves the KV flag, sends the JSON
- * response so the browser can toast "rotating ... restarting", then reboots
- * the device after a 1-second grace window so the response actually flushes.
- * Reads ?v=0 or ?v=1 from query string. */
-static void route_settings_rotate(int fd, const char *qstr) {
-    int rot = 0;
-    if (qstr) {
-        const char *p = strstr(qstr, "v=");
-        if (p) rot = atoi(p + 2) ? 1 : 0;
-    }
-    nav_settings_set_rotate_180(rot);
-    send_resp_json(fd, "{\"ok\":true,\"rebooting\":true}");
-    tal_system_sleep(1000);
-    tal_system_reset();
 }
 
 /* CP20: rich JSON for the home dashboard's auto-refresh.
@@ -769,12 +743,9 @@ static void handle_client(int client_fd) {
      * to choose between a JSON 200 response (AJAX path) and a 303 redirect (form path). */
     bool ajax = (strstr(path, "?ajax=1") || strstr(path, "&ajax=1")) ? true : false;
 
-    /* Strip query string from path for matching. Save the captured query
-     * string (after '?') so endpoints that need a query param (e.g.
-     * /api/settings/rotate?v=1) can read it post-strip. */
+    /* Strip query string from path for matching. */
     char *q = strchr(path, '?');
-    const char *qstr = NULL;
-    if (q) { qstr = q + 1; *q = 0; }
+    if (q) *q = 0;
 
     /* CP22b: AP-mode lockdown. When the device is running its setup AP, the
      * other pages are meaningless (no Wi-Fi → no clock/status/LLM/diagnostics).
@@ -812,7 +783,6 @@ static void handle_client(int client_fd) {
         if (strcmp(path, "/api/wifi/save") == 0)         route_wifi_save(client_fd, body);
         else if (strcmp(path, "/api/wifi/forget") == 0)  route_wifi_forget(client_fd);
         else if (strcmp(path, "/api/settings/save") == 0) route_settings_save(client_fd, body, ajax);
-        else if (strcmp(path, "/api/settings/rotate") == 0) route_settings_rotate(client_fd, qstr);
         else if (strcmp(path, "/api/test/tap") == 0)        route_test_tap(client_fd);
         else if (strcmp(path, "/api/test/double_tap") == 0) route_test_double_tap(client_fd);
         else if (strcmp(path, "/api/test/identify") == 0)   route_test_identify(client_fd);
