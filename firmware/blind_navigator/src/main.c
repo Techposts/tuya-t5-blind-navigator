@@ -24,12 +24,41 @@
 extern void tkl_log_output(const char *format, ...);
 
 static volatile int s_idle = 1;
-/* v0.3.4: KWS engine state. Set true once tkl_kws_init() has been called and
- * the wakeup callback is registered. play_response_kick/wait check this so
- * they only suspend/resume KWS when it's actually running. Without this guard
- * we'd call tkl_kws_disable() during nav_announce_welcome (which now runs
- * before the KWS engine is up) and crash. */
-static volatile int s_kws_ready = 0;
+/* v0.3.4 had a `s_kws_ready` flag and tkl_kws_disable/enable calls around TTS
+ * playback. Removed in the v0.3.4 hot-fix: chunked streaming alone fixed the
+ * codec contention that was causing audio cut-off, so suspending KWS is no
+ * longer needed -- and calling tkl_kws_disable() right after tkl_kws_init()
+ * during the boot welcome appeared to leave the engine in a state from which
+ * tkl_kws_enable() didn't reliably recover, breaking "Hi Tuya" detection. */
+
+/* v0.3.4 audit: wire up the wake-word feed path that v0.3.3 was missing.
+ *
+ * Tuya's KWS engine only fires its wake-word callback if it actually receives
+ * audio frames -- but our v0.3.3 boot called tdl_audio_open(audio_hdl, NULL)
+ * which means no mic-frame callback was registered, so KWS never saw any
+ * audio to score. The engine loaded the model, registered our wakeup cb,
+ * and then sat idle forever (wake_count stayed at 0). That was the real
+ * root cause of "Hi Tuya not firing" -- not a missing tkl_kws_init().
+ *
+ * The callback below receives every audio input frame (16 kHz mono 16-bit
+ * PCM, 640-byte frames typically) and forwards them straight to
+ * tkl_kws_feed_with_vad. We pass vadflag=1 unconditionally because we
+ * don't have an upstream VAD configured -- the KWS engine itself decides
+ * whether each chunk contains speech. tkl_kws_feed_with_vad is internal
+ * to the platform driver and not in any public header, so we forward-
+ * declare it here. */
+extern OPERATE_RET tkl_kws_feed_with_vad(uint8_t *data, uint16_t datalen, uint8_t vadflag);
+
+/* TDL_AUDIO_MIC_CB signature: void(*)(uint8_t type, uint8_t status,
+ * uint8_t *data, uint32_t len). The two enum-typed arguments are typedef'd
+ * to uint8_t in tdl_audio_driver.h, so we can match the signature without
+ * pulling that header in here. */
+static void nav_audio_frame_cb(uint8_t type, uint8_t status, uint8_t *data, uint32_t len) {
+    (void)type; (void)status;
+    if (data && len > 0) {
+        tkl_kws_feed_with_vad(data, (uint16_t)len, 1);
+    }
+}
 /* CP12d: forward decl so wake_word_cb can fire NAVIGATE */
 static void touch_tap_trigger(void);
 void nav_wifi_forget(void);  /* CP21: defined further down; declared here so btn_cb can call it */
@@ -45,11 +74,6 @@ static void play_response(const char *text) {
     if (!text) return;
     /* CP9: snapshot last response for double-tap replay. Truncate at buf-1. */
     snprintf(s_last_response, sizeof(s_last_response), "%s", text);
-    /* v0.3.4: suspend KWS while we play. The Wanson engine continuously consumes
-     * I2S input on the same codec/lanes our output uses; v0.3.3 testing showed
-     * audio cutting off mid-sentence and falling silent unpredictably. Resume
-     * after playback so wake-word detection comes back. */
-    if (s_kws_ready) tkl_kws_disable();
     /* CP9: switch to SPEAKING so the audio-bar waveform + green eye + footer show. */
     nav_display_set_state(DISP_STATE_SPEAKING);
     uint8_t *pcm = NULL; uint32_t len = 0;
@@ -71,7 +95,6 @@ static void play_response(const char *text) {
         while (ai_audio_player_is_playing() && tail--) tal_system_sleep(100);
         tal_psram_free(pcm);
     }
-    if (s_kws_ready) tkl_kws_enable();
 }
 
 /* CP23 split: kick audio + populate display + wait. Used when caller wants to
@@ -108,9 +131,6 @@ static int on_tts_chunk(void *ctx, const uint8_t *data, size_t len) {
 }
 
 static void play_response_kick(const char *text) {
-    /* v0.3.4: suspend KWS so its continuous I2S input doesn't compete with our
-     * output during the TTS stream. wait() re-enables. */
-    if (s_kws_ready) tkl_kws_disable();
     snprintf(s_last_response, sizeof(s_last_response), "%s", text);
     nav_display_set_state(DISP_STATE_SPEAKING);
     s_pending_total_bytes = 0;
@@ -139,48 +159,37 @@ static void play_response_kick(const char *text) {
 }
 static void play_response_wait(void) {
     if (s_pending_total_bytes == 0) {
-        /* Stream produced no body -- TTS request failed. Re-enable KWS so
-         * we don't go permanently deaf to wake word after one TTS error. */
-        if (s_kws_ready) tkl_kws_enable();
+        /* Stream produced no body -- TTS request failed. Nothing to wait for. */
         return;
     }
 
-    /* v0.3.5: with chunked streaming, DATA chunks arrived continuously over
-     * the network transfer (~3 s for typical responses), so by the time we
-     * reach this wait the player has already been draining for that long.
-     * The is_playing flag is also more reliable now (smaller chunks, no
-     * single large submit that the player has to swallow at once).
+    /* v0.3.4 hot-fix: duration-based wait. Earlier serial log showed the
+     * silence-debounce variant exiting at total=450 ms when the actual
+     * audio was ~25 s long -- is_playing flaps false right after STOP
+     * even with chunked streaming. The proc thread then terminates while
+     * the player is still draining, and any subsequent state corruption
+     * shows up as a crash mid-playback (which the user reported).
      *
-     * Use silence-debounce with a tight 300 ms window (was 800 ms in the
-     * pre-streaming attempt). Bound by total expected audio duration plus
-     * 2 s margin so a stuck player can't lock us forever. WAV header is
-     * 44 B; 32 bytes/ms at 16 kHz mono 16-bit. */
+     * Strategy: trust the byte count we observed during streaming.
+     * 16 kHz mono 16-bit = 32 bytes/ms; subtract the 44-byte WAV header.
+     * Sleep the full expected duration; tail-poll for up to 3 s as a
+     * safety margin if the player hasn't drained yet. Audio integrity
+     * over animation precision -- the SPEAKING screen may linger a
+     * second or two after the last word, that's acceptable. */
     uint32_t bytes = s_pending_total_bytes > 44 ? s_pending_total_bytes - 44 : 0;
-    int audio_ms = (int)(bytes / 32);
-    int max_ms = audio_ms + 2000;
-    if (max_ms < 2000)  max_ms = 2000;
-    if (max_ms > 30000) max_ms = 30000;
-    PR_NOTICE("[AUDIO] wait: streamed=%u audio_ms=%d max_ms=%d",
-              (unsigned)s_pending_total_bytes, audio_ms, max_ms);
+    int duration_ms = (int)(bytes / 32);
+    if (duration_ms < 1500)  duration_ms = 1500;
+    if (duration_ms > 30000) duration_ms = 30000;
+    PR_NOTICE("[AUDIO] wait: streamed=%u expected_ms=%d",
+              (unsigned)s_pending_total_bytes, duration_ms);
 
-    /* Small grace so a STOP-then-immediate-poll doesn't catch the player
-     * in a transient "no data queued" state right after the last DATA. */
-    tal_system_sleep(150);
-    int total = 150;
-    int silent_streak = 0;
-    while (total < max_ms) {
-        if (ai_audio_player_is_playing()) {
-            silent_streak = 0;
-        } else if (++silent_streak >= 3) {
-            break;  /* 300 ms consecutive silence -- truly done */
-        }
-        tal_system_sleep(100);
-        total += 100;
-    }
-    PR_NOTICE("[AUDIO] wait done: total=%d max=%d", total, max_ms);
+    int slept = 0;
+    while (slept < duration_ms) { tal_system_sleep(100); slept += 100; }
+
+    int tail = 30;
+    while (ai_audio_player_is_playing() && tail--) tal_system_sleep(100);
 
     s_pending_total_bytes = 0;
-    if (s_kws_ready) tkl_kws_enable();
 }
 
 /* CP9: replay the last response without re-querying the LLM. Used for
@@ -559,38 +568,10 @@ void nav_diag_play_test_alert(void) {
     s_idle = 1;
 }
 
-/* v0.3.4: brief on-connect introduction. Runs on its own thread so the boot
- * thread can finish (start KWS, register buttons, set IDLE state) without
- * waiting on the TTS download + playback (~5 s). v0.3.3 ran this synchronously
- * and that blocked LVGL refresh + the web UI accept loop, making the device
- * feel frozen for the first 5-10 s after connect. */
-static THREAD_HANDLE s_welcome_th = NULL;
-static void announce_welcome_th(void *arg) {
-    (void)arg;
-    /* Small delay so the IDLE display + LVGL refresh + web UI accept loop all
-     * settle before we yank the codec into SPEAKING state for the intro. */
-    tal_system_sleep(2000);
-    static const char *intro =
-        "I am IRIS, your vision co-pilot. "
-        "Tap once to navigate, twice to read text, "
-        "long press the button to identify objects.";
-    PR_NOTICE("[BOOT] announcing welcome via TTS (background)");
-    s_idle = 0;
-    play_response_kick(intro);
-    play_response_wait();
-    nav_display_set_state(DISP_STATE_IDLE);
-    s_idle = 1;
-    THREAD_HANDLE self = s_welcome_th;
-    s_welcome_th = NULL;
-    tal_thread_delete(self);
-}
-static void nav_announce_welcome(void) {
-    /* v0.3.4: 16 KB stack. Earlier 24 KB bump appeared to trigger task-heap
-     * exhaustion (welcome thread crashed mid-playback). Stay at 16 KB and
-     * watch serial for any actual stack-overflow trap. */
-    THREAD_CFG_T c = { .stackDepth = 16384, .priority = 4, .thrdname = "welcome" };
-    tal_thread_create_and_start(&s_welcome_th, NULL, NULL, announce_welcome_th, NULL, &c);
-}
+/* v0.3.4 hot-fix: nav_announce_welcome and its background thread are
+ * removed. The boot-time TTS stream was causing wake-word breakage and
+ * web-UI crashes (specifically /wifi). Re-introduce in v0.3.5 once the
+ * codec / Wi-Fi-scan interaction is understood. */
 
 /* ============================================================
  * CP13: Wi-Fi state machine helpers (KV + station + AP fallback)
@@ -965,16 +946,22 @@ void nav_app_main(void) {
      * Free heap dropped from 121 KB to 26-43 KB, breaking the TTS receive
      * path which needs ~50-150 KB to buffer the response WAV.
      *
-     * v2 (current): just call tdl_audio_open directly. Same effect on the
-     * codec init flags, no recorder allocation. */
+     * v0.3.4 audit: pass `nav_audio_frame_cb` (defined right above) to
+     * tdl_audio_open instead of NULL. The callback receives every audio
+     * input frame and forwards it to the KWS engine via
+     * tkl_kws_feed_with_vad(). Without this, KWS has no audio data to
+     * score against the wake-word model -- which was the root cause of
+     * "Hi Tuya" not firing in v0.3.3 (the engine loaded the model and the
+     * callback was registered, but no frames were ever fed). The function
+     * is declared above so we can pass it as a function pointer here. */
     {
         extern int tdl_audio_find(char *, void **);
         extern int tdl_audio_open(void *, void *);
         void *audio_hdl = NULL;
         int rt_open = tdl_audio_find(AUDIO_CODEC_NAME, &audio_hdl);
         if (rt_open == 0 && audio_hdl) {
-            rt_open = tdl_audio_open(audio_hdl, NULL);
-            PR_NOTICE("[AUDIO] tdl_audio_open(\"%s\") = 0x%x", AUDIO_CODEC_NAME, rt_open);
+            rt_open = tdl_audio_open(audio_hdl, (void *)nav_audio_frame_cb);
+            PR_NOTICE("[AUDIO] tdl_audio_open(\"%s\", frame_cb) = 0x%x", AUDIO_CODEC_NAME, rt_open);
         } else {
             PR_ERR("[AUDIO] tdl_audio_find failed: %d", rt_open);
         }
@@ -985,12 +972,16 @@ void nav_app_main(void) {
      * brightness. Must run AFTER ai_audio_player_init or the codec isn't ready. */
     ai_audio_player_set_vol(nav_settings_get_volume());
 
-    /* v0.3.3: speak a brief intro now that Wi-Fi is up + audio chain is ready.
-     * Tells a first-time user what the device is and how to use it. Blocks
-     * boot for ~5 s; acceptable since boot is already 10-15 s and this is
-     * a one-time greeting per power-on. Skipped silently if TTS proxy is
-     * unreachable -- play_response_wait handles s_pending_pcm == NULL. */
-    nav_announce_welcome();
+    /* v0.3.4 hot-fix: welcome announce DISABLED. The background-thread TTS
+     * stream during boot was implicated in two regressions: (a) "Hi Tuya"
+     * wake word stopped firing after the welcome played, and (b) the /wifi
+     * page started crashing the device when the user tapped Wi-Fi (Wi-Fi
+     * scan racing with whatever resource state the welcome's chunked TCP
+     * connection left behind). The function definition stays so we can
+     * re-introduce the welcome cleanly in v0.3.5 once we understand the
+     * interaction. For now, prioritize wake word + web UI stability over
+     * the audible greeting. */
+    /* nav_announce_welcome(); */
 
     ai_video_init(&(AI_VIDEO_CFG_T){0});
     
@@ -1039,14 +1030,20 @@ void nav_app_main(void) {
      * ai_chat_main.c also calls tkl_kws_init() right after audio init.
      * Without this, the engine loads the model but never starts the
      * detection loop, so wake_count stays at 0. */
+    /* v0.3.4 audit: full KWS bring-up sequence per Tuya's reference at
+     *   apps/tuya.ai/ai_components/ai_mode/src/ai_mode_wakeup.c:148-152.
+     * v0.3.3 was missing tkl_kws_enable() entirely -- without it the engine
+     * accepts feed data but never starts the actual recognition loop.
+     * The order is: init -> register cb -> enable. Audio frames are
+     * delivered to the engine via nav_audio_frame_cb (passed to
+     * tdl_audio_open above), which calls tkl_kws_feed_with_vad. */
     tkl_kws_init();
     tkl_kws_reg_wakeup_cb(wake_word_cb);
-    /* v0.3.4: flip the ready flag so play_response{,_kick,_wait} now
-     * suspend/resume KWS around TTS playback. Before this point any
-     * tkl_kws_disable() call would crash. */
-    s_kws_ready = 1;
+    {
+        OPERATE_RET ke = tkl_kws_enable();
+        PR_NOTICE("[KWS] tkl_kws_enable() = 0x%x", ke);
+    }
 
-    
     nav_display_set_state(DISP_STATE_IDLE);
     nav_display_set_text("Tap to navigate");
     for (;;) tal_system_sleep(1000);
