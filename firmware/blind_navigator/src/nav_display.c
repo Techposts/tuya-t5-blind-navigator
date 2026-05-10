@@ -1203,6 +1203,21 @@ static void s_screen_click_cb(lv_event_t *e) {
     (void)e;
     /* Suppress click if the press-release pair was a swipe. */
     if (s_swipe_consumed) { s_swipe_consumed = false; return; }
+    /* v0.3.5: 120 ms debounce. The GT1151QM cap-touch driver can fire
+     * multiple LVGL CLICKED events for one physical finger lift if the
+     * release is unsteady, which the existing tap/double-tap logic was
+     * misinterpreting as a true double-tap (firing replay) AND then a
+     * fresh tap (firing a new NAVIGATE) on a single user intent. Time-
+     * gate clicks: anything within 120 ms of the previous click is a
+     * driver bounce, drop it. Real double-taps from a human are ~200 ms
+     * apart minimum so 120 ms is well below the legitimate threshold. */
+    static uint32_t s_last_click_ms = 0;
+    uint32_t now_ms = lv_tick_get();
+    if ((now_ms - s_last_click_ms) < 120) {
+        return;  /* debounced bounce */
+    }
+    s_last_click_ms = now_ms;
+
     /* CP9: double-tap detection. */
     if (s_tap_timer) {
         /* Second tap within the window -- it's a double-tap. Cancel the

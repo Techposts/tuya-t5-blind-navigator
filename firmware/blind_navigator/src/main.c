@@ -155,25 +155,42 @@ static void play_response_kick(const char *text) {
     s_play_interrupt = 0;  /* v0.3.5: clear any stale interrupt before this round */
     s_stream_start_ms = (uint32_t)tal_system_get_millisecond();
 
-    /* v0.3.5: single retry on stream failure / empty response. User
-     * reported NAVIGATE/READ produced no audio about 2/3 of the time on
-     * first attempt while welcome (which runs from a different thread on
-     * a fresh TCP socket) worked reliably. Retry covers transient
-     * proxy-side timing or socket reuse issues without masking persistent
-     * faults. */
+    /* v0.3.5: progressive-backoff retry on stream failure or short body.
+     * Earlier single-retry covered TCP-connect failures but missed two
+     * silent failure modes:
+     *   (a) Stream "succeeds" with only WAV-header-sized body (~44 B) --
+     *       happens when the proxy connects to OpenAI but OpenAI returns
+     *       an empty/error response masked into 200. The previous
+     *       `total_bytes == 0` check let this through and we'd play
+     *       silence.
+     *   (b) Flask connection-pool warm-up after idle, where the first
+     *       request takes >1 s to forward. Single 200 ms backoff isn't
+     *       always enough; the proxy needs ~500 ms to clear sometimes.
+     *
+     * Three attempts with progressive backoff (200/500/1000 ms). Success
+     * threshold raised to 4096 bytes (≈125 ms of audio) -- anything less
+     * is meaningless. */
+    #define TTS_MIN_OK_BYTES   4096
+    #define TTS_MAX_ATTEMPTS   3
+    static const int s_backoff_ms[TTS_MAX_ATTEMPTS] = { 0, 250, 600 };
+    OPERATE_RET rt = OPRT_COM_ERROR;
     ai_audio_play_tts_stream(AI_AUDIO_PLAYER_TTS_START, AI_AUDIO_CODEC_WAV, NULL, 0);
-    OPERATE_RET rt = openai_tts_stream(text, on_tts_chunk, NULL);
-    if (rt != OPRT_OK || s_pending_total_bytes == 0) {
-        PR_ERR("[AUDIO] tts_stream attempt 1 failed: rt=%d bytes=%u, retrying once",
-               (int)rt, (unsigned)s_pending_total_bytes);
+    for (int attempt = 0; attempt < TTS_MAX_ATTEMPTS; attempt++) {
+        if (s_backoff_ms[attempt] > 0) tal_system_sleep(s_backoff_ms[attempt]);
         s_pending_total_bytes = 0;
-        tal_system_sleep(200);  /* let proxy / socket settle */
+        s_stream_start_ms = (uint32_t)tal_system_get_millisecond();
         rt = openai_tts_stream(text, on_tts_chunk, NULL);
+        PR_NOTICE("[AUDIO] tts_stream attempt %d/%d: rt=%d bytes=%u",
+                  attempt + 1, TTS_MAX_ATTEMPTS, (int)rt,
+                  (unsigned)s_pending_total_bytes);
+        if (rt == OPRT_OK && s_pending_total_bytes >= TTS_MIN_OK_BYTES) {
+            break;  /* good enough audio, done */
+        }
     }
     ai_audio_play_tts_stream(AI_AUDIO_PLAYER_TTS_STOP, AI_AUDIO_CODEC_WAV, NULL, 0);
-    if (rt != OPRT_OK) {
-        PR_ERR("[AUDIO] tts_stream still failed after retry: rt=%d bytes=%u",
-               (int)rt, (unsigned)s_pending_total_bytes);
+    if (rt != OPRT_OK || s_pending_total_bytes < TTS_MIN_OK_BYTES) {
+        PR_ERR("[AUDIO] tts_stream gave up after %d attempts: rt=%d bytes=%u",
+               TTS_MAX_ATTEMPTS, (int)rt, (unsigned)s_pending_total_bytes);
     }
     /* return now -- caller updates display; wait() blocks for playback drain */
 }
