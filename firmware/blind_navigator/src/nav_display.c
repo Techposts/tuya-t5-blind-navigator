@@ -1053,6 +1053,12 @@ static void iris_update_arc_anims(disp_state_t st) {
         for (int i = 0; i < 4; i++) {
             lv_obj_add_flag(s_speak_field_label[i], LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(s_speak_field_value[i], LV_OBJ_FLAG_HIDDEN);
+            /* Clear stale text so the next SPEAKING entry starts blank
+             * until set_speak_response() populates fresh fields. The
+             * double-tap replay path repopulates via set_speak_response
+             * after set_state(SPEAKING), so it is unaffected. */
+            if (s_speak_field_label[i]) lv_label_set_text(s_speak_field_label[i], "");
+            if (s_speak_field_value[i]) lv_label_set_text(s_speak_field_value[i], "");
         }
         for (int b = 0; b < 21; b++) lv_anim_del(s_bars[b], bar_h_cb);
     }
