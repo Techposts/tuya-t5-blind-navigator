@@ -41,12 +41,17 @@ static char *extract_chat_text(const char *json_str) {
 }
 
 /* Plain HTTP to local Flask proxy. Proxy injects Authorization and forwards
- * to api.openai.com over HTTPS, sidestepping the T5 mbedtls cipher issue. */
-static int openai_post_json(const char *path, const char *body,
-                            uint8_t *resp_buf, size_t resp_buf_size,
-                            const uint8_t **out_body, size_t *out_len) {
+ * to api.openai.com over HTTPS, sidestepping the T5 mbedtls cipher issue.
+ *
+ * v0.3.6: generalised to accept arbitrary Content-Type + binary bodies so
+ * the multipart Whisper upload can reuse the same path. JSON path delegates
+ * to openai_post_typed with content_type="application/json". */
+static int openai_post_typed(const char *path, const char *content_type,
+                             const uint8_t *body, size_t body_len,
+                             uint8_t *resp_buf, size_t resp_buf_size,
+                             const uint8_t **out_body, size_t *out_len) {
     http_client_header_t headers[] = {
-        {"Content-Type", "application/json"}
+        {"Content-Type", content_type}
     };
     http_client_request_t req = {
         .host = NAV_PROXY_HOST,
@@ -57,8 +62,8 @@ static int openai_post_json(const char *path, const char *body,
         .method = "POST",
         .headers = headers,
         .headers_count = 1,
-        .body = (const uint8_t *)body,
-        .body_length = strlen(body),
+        .body = body,
+        .body_length = body_len,
         .timeout_ms = 60000
     };
     http_client_response_t resp = { .buffer = resp_buf, .buffer_length = resp_buf_size };
@@ -72,7 +77,93 @@ static int openai_post_json(const char *path, const char *body,
     return 0;
 }
 
-OPERATE_RET openai_transcribe(const uint8_t *wav, uint32_t len, char **out) { return OPRT_COM_ERROR; }
+static int openai_post_json(const char *path, const char *body,
+                            uint8_t *resp_buf, size_t resp_buf_size,
+                            const uint8_t **out_body, size_t *out_len) {
+    return openai_post_typed(path, "application/json",
+                             (const uint8_t *)body, strlen(body),
+                             resp_buf, resp_buf_size, out_body, out_len);
+}
+
+/* ============================================================
+ * v0.3.6: Whisper transcription (multipart upload)
+ * ============================================================
+ * Caller passes a complete RIFF/WAVE buffer (header + PCM). We wrap
+ * it in multipart/form-data with model=whisper-1 + response_format=json
+ * and POST to /v1/audio/transcriptions. The Flask proxy is a transparent
+ * /v1/<path> passthrough so no proxy changes are needed.
+ *
+ * Boundary is fixed -- multipart only requires the boundary string not
+ * appear in the body, and our WAV PCM payload will not contain this
+ * exact 32-char ASCII sequence.
+ *
+ * Memory: one PSRAM allocation of ~(wav_len + 400 bytes) for the body
+ * plus an 8 KB response buffer. Both freed before return. Whisper's
+ * JSON response for an 8 s clip is ~50-200 bytes. */
+#define WHISPER_BOUNDARY  "----iris-followup-0a1b2c3d4e5f6789"
+#define WHISPER_RESP_BUF  (8 * 1024)
+
+OPERATE_RET openai_transcribe(const uint8_t *wav, uint32_t len, char **out) {
+    *out = NULL;
+    if (!wav || len == 0) return OPRT_INVALID_PARM;
+
+    static const char preamble[] =
+        "--" WHISPER_BOUNDARY "\r\n"
+        "Content-Disposition: form-data; name=\"model\"\r\n"
+        "\r\n"
+        "whisper-1\r\n"
+        "--" WHISPER_BOUNDARY "\r\n"
+        "Content-Disposition: form-data; name=\"response_format\"\r\n"
+        "\r\n"
+        "json\r\n"
+        "--" WHISPER_BOUNDARY "\r\n"
+        "Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n"
+        "Content-Type: audio/wav\r\n"
+        "\r\n";
+    static const char trailer[] = "\r\n--" WHISPER_BOUNDARY "--\r\n";
+
+    const size_t plen = sizeof(preamble) - 1;  /* drop trailing NUL */
+    const size_t tlen = sizeof(trailer)  - 1;
+    const size_t body_len = plen + len + tlen;
+
+    uint8_t *body = (uint8_t *)tal_psram_malloc(body_len);
+    if (!body) {
+        PR_ERR("[WHISPER] body psram alloc %u bytes failed", (unsigned)body_len);
+        return OPRT_MALLOC_FAILED;
+    }
+    size_t off = 0;
+    memcpy(body + off, preamble, plen); off += plen;
+    memcpy(body + off, wav, len);       off += len;
+    memcpy(body + off, trailer, tlen);  off += tlen;
+
+    uint8_t *rbuf = (uint8_t *)tal_psram_malloc(WHISPER_RESP_BUF);
+    if (!rbuf) { tal_psram_free(body); return OPRT_MALLOC_FAILED; }
+
+    const uint8_t *rbody = NULL; size_t rlen = 0;
+    int res = openai_post_typed("/v1/audio/transcriptions",
+                                "multipart/form-data; boundary=" WHISPER_BOUNDARY,
+                                body, body_len,
+                                rbuf, WHISPER_RESP_BUF, &rbody, &rlen);
+    tal_psram_free(body);
+
+    if (res == 0 && rbody && rlen > 0) {
+        /* Whisper response: {"text":"..."} -- needs its own parser
+         * because extract_chat_text walks choices/message/content. */
+        cJSON *root = cJSON_Parse((const char *)rbody);
+        if (root) {
+            cJSON *t = cJSON_GetObjectItem(root, "text");
+            if (t && cJSON_IsString(t) && t->valuestring) {
+                size_t n = strlen(t->valuestring);
+                *out = (char *)tal_malloc(n + 1);
+                if (*out) { memcpy(*out, t->valuestring, n); (*out)[n] = 0; }
+            }
+            cJSON_Delete(root);
+        }
+    }
+    tal_psram_free(rbuf);
+    return (*out) ? OPRT_OK : OPRT_COM_ERROR;
+}
+
 OPERATE_RET openai_ask_text(const char *text, char **out) { return OPRT_COM_ERROR; }
 OPERATE_RET openai_ask_audio(const uint8_t *wav, uint32_t len, char **out) { return OPRT_COM_ERROR; }
 
