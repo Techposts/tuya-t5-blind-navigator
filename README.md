@@ -19,19 +19,31 @@ The device is a **navigation co-pilot**, not a tour guide — every response is 
 
 ---
 
-## What v0.3.3 ships
+## What v0.3.5 ships
 
-The "Hi Tuya" wake word now fires reliably. The Wanson KWS engine was loading the model and registering our callback, but it was never starting the I2S capture loop — `tkl_kws_init()` was missing. One added line; verified on hardware by saying "Hi Tuya" and watching NAVIGATE fire without any tap.
+Five fixes that turn the v0.3.3 "kinda works" prototype into something a video shoot can actually demo end-to-end.
 
-The device also now introduces itself audibly on first boot. Right after Wi-Fi connects and the audio chain is up, IRIS speaks a 3-sentence intro through the speaker: *"I am IRIS, your vision co-pilot. Tap once to navigate, twice to read text, long press the button to identify objects."* — first-time users hear what the device does without needing to read the LCD.
+- **Hi Tuya wake-word range fixed.** Was 5 cm; now ~1-1.5 m. The BK7258 ADC mic gain was sitting at hardware default — a commented-out `tkl_ai_set_vol(0, 0, 80)` in the SDK had been there as a hint. Bypassed the side-effect-laden TKL wrapper and call `bk_aud_adc_set_gain(50)` directly (≈80 % of 0x3F max). With AEC already enabled on board V102, this is the realistic ceiling for the onboard MEMS without beamforming.
+- **Multilingual TTS works.** /settings has had EN/ES/HI/AR for ages but the value was stored in KV and never used. Now the language directive is appended to the LLM prompt: `"Write the SPOKEN line in <Hindi/Spanish/Arabic>. Keep the other fields in English for the display."` — GPT-4o-mini and gpt-4o-mini-tts handle these natively via the alloy voice. Switch in /settings, next NAVIGATE response is in the new language.
+- **Chunked TTS streaming** (carried from v0.3.4): audio starts ~500 ms after request instead of buffering the full WAV. Per-call memory drops from 320 KB to ~6 KB.
+- **Animation matches audio end.** Was a duration-based wait that ignored the streaming overlap; now `remaining_ms = audio_ms - elapsed_during_stream`. The hardcoded 4-s post-speak linger is also interruptible.
+- **Universal interrupt.** Tap, swipe up, swipe down, and the physical button — any of these during the SPEAKING screen now stops audio and returns to IDLE within ~500 ms. No more waiting through long responses.
 
-The TEST SPEAKER button in the web UI no longer leaves the device stuck on the speaking visual screen — explicit IDLE restore after the welcome plays. A concurrency guard also refuses TEST SPEAKER while NAVIGATE / READ / IDENTIFY is in flight (was producing ring-buffer corruption when both fired at once).
+Also in v0.3.5: AP DHCP settle delay (1.2 s after `tal_wifi_ap_start`) so phones get DHCP leases on first connect attempt instead of "network temporarily unavailable".
 
-**Known open issues** (deferred to v0.3.4):
+**Known open issues** (deferred to v0.3.6):
 
-- **TTS audio cuts off / occasionally silent** — regression from the wake-word fix. The KWS engine now keeps the I2S input path active continuously (necessary for "Hi Tuya" to work), which contends with the I2S output path during TTS playback. Symptom: welcome message and NAVIGATE / READ responses sometimes end mid-sentence or don't play at all. v0.3.4 fix: suspend KWS during playback, resume after.
-- **AP DHCP flakiness** — post-flash, when the device boots into AP mode for provisioning, phones sometimes get "network temporarily unavailable" or no IP on first connect attempt. Succeeds after 1-3 retries. Probable platform-level race between `bk_wifi_ap_start` returning and the netif coming up. Application code matches Tuya's production reference byte-for-byte; this is a platform-timing issue.
-- **Captive portal hijack** — joining the IRIS AP shows "Internet may not be available" because there's no internet on the AP-only network. Workaround: ignore the warning, manually open `192.168.4.1`. v0.3.4 will add a UDP/53 DNS hijack so the standard "Sign in to network" sheet appears.
+- **Voice follow-up Q&A** — wake word fires but the device doesn't yet record + transcribe a follow-up question. Needs `ai_audio_input_init` recorder + Whisper transcription + dynamic prompt. ~150-250 LOC.
+- **Captive portal hijack** — joining the IRIS AP shows "Internet may not be available" because there's no internet on the AP-only network. Workaround: ignore the warning, manually open `192.168.4.1`. v0.3.6 will add a UDP/53 DNS hijack so the standard "Sign in to network" sheet appears.
+- **NTP `--:--`** — clock never syncs. `tal_time_check_time_sync` returns 0xffffffff. TuyaOpen's time service likely depends on Tuya cloud auth which we're not running; will need a custom SNTP client (~80 LOC).
+- **Boot welcome message** — broke wake word in v0.3.4. Reintroduce in v0.3.6 with KWS-first ordering.
+- **180° rotation toggle** — v0.3.4 attempt caused an LVGL UsageFault. v0.3.6 will use an `lv_timer_create` deferred-init that fires after the first display refresh, when `lv_display_get_default()` is safe to call.
+
+## What v0.3.3 / v0.3.4 shipped
+
+v0.3.3 fixed the "Hi Tuya" wake word with a one-line `tkl_kws_init()` and added a boot-time welcome announce. The welcome was removed in v0.3.4 because it broke wake-word + crashed /wifi (the boot-time TTS stream was leaving Wi-Fi scan in a bad state).
+
+v0.3.4 introduced chunked TCP-streamed TTS via `openai_tts_stream()` (per-call memory dropped from 320 KB to 6 KB; latency from 3 s to 500 ms), and fixed the deeper wake-word root cause: the v0.3.3 fix was missing `tkl_kws_enable()` and was passing NULL as the audio frame callback to `tdl_audio_open` — so KWS loaded its model and registered our callback but never received any audio frames. Now `nav_audio_frame_cb` forwards every mic frame to `tkl_kws_feed_with_vad`.
 
 ## What v0.3.2 shipped
 

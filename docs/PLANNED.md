@@ -2,7 +2,7 @@
 
 Single source of truth for what's done, what's next, and what's parked. Updated alongside major releases.
 
-**Current release**: `v0.3.3` (2026-05-10) — wake word "Hi Tuya" now fires reliably (one-line fix: `tkl_kws_init()` was missing) + audible welcome message on first Wi-Fi connect ("I am IRIS, your vision co-pilot...") + TEST SPEAKER restores idle state (no longer stuck on speaking screen) + concurrency guard (`s_idle`) on TEST SPEAKER. **Open issues**: AP DHCP flakiness on first connect (deferred to v0.3.4 along with hardcoded-fallback removal that v0.3.3 was supposed to do — kept for now since AP DHCP isn't reliable). Previous: `v0.3.2` codec output path fix + SPOKEN parser fix + audio/display sync.
+**Current release**: `v0.3.5` (2026-05-10) — mic gain boost (5cm→1.5m wake-word range via `bk_aud_adc_set_gain(50)`), multilingual SPOKEN line (EN/ES/HI/AR via prompt directive), chunked TCP TTS streaming (320 KB→6 KB memory, 500 ms first-audio latency), time-tracked wait + interruptible 4 s linger (animation ends with audio), universal interrupt (tap/swipe/button stop SPEAKING), AP DHCP settle (phones DHCP on first try), proper KWS bring-up (audio frame callback + `tkl_kws_enable()`). **Open**: voice follow-up Q&A (Whisper), captive-portal hijack, NTP, welcome reintro, rotation toggle. Earlier: v0.3.4 hot-fix `faacc5a` (KWS audit + LVGL fault fix), v0.3.3 release (initial wake-word + welcome attempt), v0.3.2 (codec output + SPOKEN parser).
 
 ---
 

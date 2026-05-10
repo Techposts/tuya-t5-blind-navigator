@@ -849,6 +849,75 @@ iOS / Android captive-portal probes (`captive.apple.com`, `connectivitycheck.gst
 
 ---
 
+## v0.3.4 hot-fix `faacc5a` — wake-word real fix + LVGL fault + chunked streaming · 2026-05-10
+
+v0.3.4 commit `7fa93bd` shipped chunked streaming + welcome announce + 180° rotation toggle, but on-hardware testing surfaced a UsageFault (LVGL thread, unaligned access) on every reboot, web-UI crashes, and the wake word stayed broken. The hot-fix `faacc5a` is the stable result.
+
+**Wake-word real root cause** (the v0.3.3 fix wasn't enough): v0.3.3 called `tkl_kws_init()` + `tkl_kws_reg_wakeup_cb()` but never called `tkl_kws_enable()`, AND passed `NULL` as the audio frame callback to `tdl_audio_open`. KWS loaded its model and accepted our wakeup-cb registration, then sat idle forever — no audio routed to it. Fix: define `nav_audio_frame_cb` that forwards every mic frame to `tkl_kws_feed_with_vad`, pass it to `tdl_audio_open` instead of `NULL`, add `tkl_kws_enable()` after the registration. Reference: `apps/tuya.ai/ai_components/ai_mode/src/ai_mode_wakeup.c:148-152`.
+
+**LVGL UsageFault**: removed the `lv_display_get_default()` + `lv_display_set_rotation()` block from `nav_display_init`. Tuya's LVGL wrapper sets up the default display *asynchronously* after `lv_vendor_start`, so calling `get_default()` synchronously inside init returns a pointer that the LVGL render thread later faults on (unaligned access).
+
+**Chunked TTS streaming** (kept): `openai_tts_stream()` in openai_backend.c uses raw TCP via `tal_net_socket` + `tal_net_send/recv`. Streams the WAV from the proxy in 4 KB recv chunks, feeds each chunk straight into `ai_audio_play_tts_stream(DATA, ...)`. Audio starts ~500 ms after request; per-call memory drops from 320 KB to ~6 KB.
+
+**Removed in hot-fix**: KWS suspend/resume around TTS playback (not needed once chunked streaming fixed cut-off), 180° rotation toggle UI (caused the LVGL fault), boot welcome announce (broke wake word + crashed /wifi).
+
+---
+
+## v0.3.5 — Mic gain + multilingual + interruptible animation · 2026-05-10
+
+The release that turns the v0.3.4 base into something a video shoot can demo end-to-end. Five user-facing fixes from on-hardware testing.
+
+### Bugs fixed
+
+#### 1. Wake-word range was 5 cm
+
+User reported having to be within 5 cm of the device for "Hi Tuya" to fire. Audit found `tdd_audio.c:108` has a commented-out `tkl_ai_set_vol(0, 0, 80)` — the boot path leaves the BK7258's ADC mic gain at hardware default which is far too low for far-field MEMS.
+
+`tkl_ai_set_vol` has a side effect of toggling the speaker-enable GPIO (lines 612-617 in `tkl_audio.c`) which can mute the speaker. Bypass it and call the underlying BK SDK directly: `bk_aud_adc_set_gain(50)` where 50 ≈ 80 % of `0x3F` max. With AEC already enabled (board V102 auto-selects `ENABLE_AUDIO_AEC`), this restores usable far-field range — verified ~1-1.5 m on hardware. Beyond that you'd need beamforming.
+
+#### 2. Language setting in /settings did nothing
+
+User changed /settings to Hindi, no audio change. `nav_settings_get_language()` was defined and storing to KV but the value was never read at query time. Fix: in `proc_th`, build a language-aware prompt before calling `openai_ask_image`. Append `"IMPORTANT: Write the SPOKEN line in <Hindi/Spanish/Arabic/English>. Keep the other fields in English for the display."` to the active prompt template. GPT-4o-mini and `gpt-4o-mini-tts` both handle these languages natively via the alloy voice.
+
+Forward-declared `nav_settings_get_language` at the top of main.c since `proc_th` uses it before the definition appears later.
+
+#### 3. SPEAKING animation lingered for several seconds after audio ended
+
+Pure duration-based wait was sleeping the full `audio_ms` after STOP, but with chunked streaming, audio has been playing throughout the multi-second network transfer. By STOP time, much of `audio_ms` has already played; the remainder is much smaller.
+
+Fix: timestamp `s_stream_start_ms` in `play_response_kick`. In the wait, compute `remaining_ms = audio_ms - elapsed_ms`; bound 200-8000 ms. Tail poll on `is_playing` kept (with interrupt check).
+
+#### 4. The 4-second post-speak linger (CP11) ignored every gesture
+
+`tal_system_sleep(4000)` at the end of `proc_th` was hardcoded. Even if the wait loop exited early, this kept SPEAKING up for 4 more seconds with no way to skip. Now broken into a 100 ms-tick poll that exits on `s_play_interrupt`.
+
+#### 5. Tap-to-interrupt only worked from the duration sleep, not from the linger or other gestures
+
+v0.3.4's tap-to-interrupt (commit `c888935`) fired `s_play_interrupt = 1` + `ai_audio_player_stop(AI_AUDIO_PLAYER_FG)`. v0.3.5 extends:
+- `touch_swipe_up_trigger` and `touch_swipe_down_trigger` now check `nav_display_get_state() == DISP_STATE_SPEAKING` and set the same flag.
+- The CP11 linger now polls the flag (see #4 above).
+- Button SINGLE_CLICK funnels into `touch_tap_trigger` so it inherits the same interrupt behavior.
+
+### Also in v0.3.5
+
+- **AP DHCP settle** (commit `a2c0f65`): 1.2 s sleep after `tal_wifi_ap_start` so the underlying lwIP netif + DHCP server task have time to come up before phones DHCPDISCOVER. Should fix the "network temporarily unavailable" UX on first AP join.
+
+### Release artifacts
+
+- **Binary**: `iris_v0.3.5_QIO.bin`
+- **SHA256**: `0797aefe1c8b85dc8fb80f69bb4dd6a2ae6cd9a237e0babc3cf617f95741401d`
+
+### Known open issues (deferred to v0.3.6)
+
+- **Voice follow-up Q&A** — wake word fires reliably now but the device doesn't yet record + transcribe a follow-up question. Needs `ai_audio_input_init` recorder + Whisper + dynamic prompt.
+- **Captive portal hijack** — UDP/53 listener returning 192.168.4.1 for all queries.
+- **NTP `--:--`** — `tal_time_check_time_sync` returns 0xffffffff. Likely needs custom SNTP client.
+- **Boot welcome message reintro** — needs KWS-first ordering.
+- **180° rotation toggle reintro** — via `lv_timer_create` deferred init.
+- **Hardcoded `NAV_SSID_LIST` fallback removal** — only after AP DHCP fix is verified by multiple devices.
+
+---
+
 ## Deferrals (updated 2026-05-02 after CP11b landed)
 
 | Item | Why deferred |
