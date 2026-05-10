@@ -43,6 +43,7 @@ extern uint32_t nav_diag_get_wake_count(void);
 extern void     nav_diag_trigger_tap(void);
 extern void     nav_diag_trigger_double_tap(void);
 extern void     nav_diag_trigger_identify(void);
+extern void     nav_diag_play_test_alert(void);   /* CP23: speaker bisect test */
 
 /* CP20: state getter for live home dashboard */
 #include "nav_display.h"
@@ -77,6 +78,10 @@ static const char *HEAD =
     "<!DOCTYPE html><html lang=en><head><meta charset=utf-8>"
     "<meta name=viewport content='width=device-width,initial-scale=1'>"
     "<title>IRIS</title>"
+    /* CP23: inline SVG favicon mirroring the bionic-eye motif --
+     * outer cyan ring + white center pupil. data: URI keeps the device
+     * self-contained, no extra HTTP route needed. */
+    "<link rel=icon type='image/svg+xml' href=\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><circle cx='32' cy='32' r='28' fill='%2305070A' stroke='%234FE3F0' stroke-width='3'/><circle cx='32' cy='32' r='14' fill='%234FE3F0' opacity='0.18'/><circle cx='32' cy='32' r='6' fill='%23F4F6FA'/></svg>\">"
     "<link href='https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap' rel=stylesheet>"
     "<style>"
     "*{box-sizing:border-box;margin:0;padding:0}"
@@ -419,6 +424,13 @@ static void route_settings(int fd) {
         "<h2>Audio</h2>"
         "<label>VOLUME (%d%%)</label>"
         "<input name=volume type=range min=0 max=100 step=5 value=%d oninput='this.previousElementSibling.textContent=`VOLUME (${this.value}%%)`'>"
+        /* CP23: TEST SPEAKER button -- plays a known-good local alert WAV
+         * (no network/TTS) so the user can bisect audio bugs and check
+         * volume changes are actually reaching the codec. */
+        "<button type=button onclick=\"fetch('/api/test/play_alert',{method:'POST'}).then(()=>toast('played \xe2\x99\xab at '+document.querySelector('input[name=volume]').value+'%%')).catch(()=>toast('play failed',1));\" "
+        "style='margin-top:10px;background:rgba(74,222,128,0.08);color:#4ADE80;border-color:#4ADE80'>"
+        "\xe2\x99\xab TEST SPEAKER"
+        "</button>"
         "<label>VOICE</label>"
         "<select name=voice>"
         "<option value=LO%s>LO (deeper)</option>"
@@ -698,6 +710,13 @@ static void route_test_double_tap(int fd) {
     send_resp_json(fd, "{\"ok\":true,\"action\":\"double_tap\"}");
 }
 
+/* CP23: speaker bisect test -- plays the local "Hello, I'm here" alert
+ * WAV through the audio player. Bypasses TTS + proxy entirely. */
+static void route_test_play_alert(int fd) {
+    nav_diag_play_test_alert();
+    send_resp_json(fd, "{\"ok\":true,\"action\":\"play_alert\"}");
+}
+
 static void route_test_identify(int fd) {
     nav_diag_trigger_identify();
     send_resp_json(fd, "{\"ok\":true,\"action\":\"identify\"}");
@@ -764,6 +783,7 @@ static void handle_client(int client_fd) {
         else if (strcmp(path, "/api/test/tap") == 0)        route_test_tap(client_fd);
         else if (strcmp(path, "/api/test/double_tap") == 0) route_test_double_tap(client_fd);
         else if (strcmp(path, "/api/test/identify") == 0)   route_test_identify(client_fd);
+        else if (strcmp(path, "/api/test/play_alert") == 0) route_test_play_alert(client_fd);
         else                                             send_404(client_fd);
     }
     else {

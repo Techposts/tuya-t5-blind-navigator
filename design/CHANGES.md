@@ -713,6 +713,73 @@ j: dedicated forget overlay — replaces the mode banner for forget messages wit
 
 ---
 
+## v0.3.2 — Audio fix + parser fix + speed-up · 2026-05-10
+
+After v0.3.1 hardware testing surfaced silent-audio symptoms post-reboot, this release does the deep root-cause work to actually make the audio output path *reliably* play through the onboard speaker. Plus latency improvements and a UX reorder so audio + display arrive together. Single tag bundling all the diagnostic work + multiple fixes from one continuous testing loop.
+
+### Bugs fixed
+
+#### 1. Codec output path: `OPRT_RESOURCE_NOT_READY` from `tkl_ao_put_frame`
+
+The bug that made the speaker silent on every TTS response and even local alerts:
+
+- The TKL audio driver (`tkl_audio.c`) gates `tkl_ao_put_frame` behind `s_audio_init.audio_init && s_audio_init.audio_start`. Both flags are set only inside `tkl_ai_init` (called via `tdl_audio_open` → `__tdd_audio_open`).
+- v0.3.0 / v0.3.1 never called `tdl_audio_open` for our app. The wake-word KWS engine has its own audio path that doesn't go through tdl, so the device's input side worked while output stayed dead.
+- Symptom: every `tkl_ao_put_frame` returned `-23`. Visible on serial as `tdd_audio.c:141 ret:-23` repeating.
+
+Fix: explicitly call `tdl_audio_open(audio_codec, NULL)` once during `nav_app_main` after `board_register_hardware`. First attempt used `ai_audio_input_init` which did open the codec but allocated a 12.8-second recorder buffer (~400 KB) that we never used — this dropped free heap from 121 KB to 26-43 KB and broke the *next* layer (TTS WAV download couldn't fit). Final fix calls `tdl_audio_open` directly, no recorder, free heap stays at 136 KB+.
+
+#### 2. SPOKEN line never reached the TTS
+
+The parser at `parse_labeled_response` had a hard cap:
+
+```c
+while (line && out->field_count < 4) { ... }
+```
+
+The LLM response is 5 labeled lines: `PATH STATUS` / `WHERE` / `ACTION` / `WHY` / `SPOKEN`. After 4 fields the loop exited — never seeing SPOKEN. Fallback then built TTS prose by concatenating the 4 short visual fields, which is exactly the "audio just reads the screen" / "very brief" symptom users reported.
+
+Fix: change the loop to `while (line)` and move the 4-field cap into the *display-field* branch only. SPOKEN always gets parsed regardless of how many display fields preceded it.
+
+#### 3. Display vs audio timing — they now arrive together
+
+Previously: vision LLM → display fields → TTS download (2-3s) → audio playback. User saw display first, silence for a couple seconds, then audio kicked. Felt broken.
+
+Reorder didn't fix it — moving display *after* `play_response` made display appear after audio finished (since `play_response` blocked on `while(ai_audio_player_is_playing())`).
+
+Final fix: split `play_response` into `play_response_kick` (returns once audio is queued, ~2-3s for TTS download) and `play_response_wait` (blocks until playback finishes). Sandwich the display update between them: kick → display → wait. Audio + display now appear within ~50 ms of each other.
+
+### Latency improvement
+
+Camera autoexpose warmup reduced from **3500 ms → 1500 ms**. Saves 2 seconds on every NAVIGATE / READ / IDENTIFY query. The GC2145 stabilizes well within 1.5 s for navigation-quality images; the longer warmup was paranoia.
+
+### TEST SPEAKER button now plays a real welcome message
+
+Was: brief "Hello, I'm here" via local alert WAV (only validated codec + speaker). Now: TTS-generated 4-sentence welcome message via the same pipeline real responses use. Validates the entire chain end-to-end (proxy → OpenAI TTS → device receive → codec → speaker) and serves as a self-introduction for sighted helpers.
+
+### Mac-side flashing setup
+
+Built out `tools/` directory: Python venv (`tools/flash-venv/`) with `pyserial`, `tqdm`, `click`, `PyYAML`, `requests`, `rich` deps; rsynced `tools/tyutool/` from the dev VM. Flashing now works directly from the Mac via `tools/flash-venv/bin/python tools/tyutool/tyutool_cli.py write -d T5AI -f releases/iris_v0.3.2_QIO.bin -p /dev/cu.usbmodem5AAE1675771 -b 460800`. No more VM round-trip for flash; build still requires VM toolchain.
+
+### Web UI favicon
+
+Inline SVG bionic-eye favicon (data URI in `<link rel=icon>`) — outer cyan ring + white center pupil, matches the on-device LCD motif. No additional HTTP route needed.
+
+### Tuya partnership confirmation: BT TWS not feasible on T5AI
+
+7 Bluetooth-capability questions sent to Tuya 2026-05-02; answer received 2026-05-10: T5-E1-IPEX module does not expose classic BT (BR/EDR) at a usable level for A2DP, even though BSP A2DP source files exist. Locked decision: stay with onboard speaker; no external module path either. The "private audio" UX gap remains a known hardware limitation of this board for this firmware family.
+
+### Known open issue (deferred to next release)
+
+- **"Hi Tuya" wake word not firing reliably**. The Wanson KWS engine initializes (serial confirms model load) but `wake_count` stays at 0 even after speaking the wake word at close range. Not a regression from v0.3.1 — same behavior as before. Needs separate debug session: probably mic-routing question (was working when codec wasn't actually opened, may be different path now), or KWS callback registration timing relative to audio init order. Documented for v0.3.3 / v0.4.0.
+
+### Release artifacts
+
+- **Binary**: `iris_v0.3.2_QIO.bin`
+- **SHA256**: `14848f1ad0c4b91ec966e545d9c2d249ed43c320cd462d60a886aff22f99b4d3`
+
+---
+
 ## Deferrals (updated 2026-05-02 after CP11b landed)
 
 | Item | Why deferred |

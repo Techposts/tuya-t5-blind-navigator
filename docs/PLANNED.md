@@ -2,7 +2,7 @@
 
 Single source of truth for what's done, what's next, and what's parked. Updated alongside major releases.
 
-**Current release**: `v0.3.1` (2026-05-02) — setup-without-rebuild + Hi Tuya wake + forget-Wi-Fi (web + 5 s hold) + AP UX hardening + dedicated forget overlay + live AJAX settings + polished home dashboard. v0.3.0 marked Phase 2 done; v0.3.1 closes every UX gap surfaced by hardware testing on top of it.
+**Current release**: `v0.3.2` (2026-05-10) — codec output path fix (`tdl_audio_open` opens audio engine; was returning `-23` on every `tkl_ao_put_frame`) + SPOKEN parser fix (was capping at 4 fields, dropping the 5th line) + audio/display sync via kick+wait split + camera warmup 3500→1500ms + TEST SPEAKER plays TTS welcome message + Mac-side flashing tools + favicon. **Open issue**: "Hi Tuya" wake word not firing reliably (`wake_count` stays 0); deferred to v0.3.3.
 
 ---
 
