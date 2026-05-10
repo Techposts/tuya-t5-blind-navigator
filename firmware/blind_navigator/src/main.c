@@ -756,6 +756,19 @@ static OPERATE_RET nav_wifi_start_ap(void) {
     PR_NOTICE("[AP] tal_wifi_ap_start = 0x%x ssid=%s ip=%s chan=%d",
               rt, ap_ssid, NAV_AP_IP, NAV_AP_CHAN);
 
+    /* v0.3.5 AP-DHCP race fix: tal_wifi_ap_start returns once the radio is
+     * broadcasting the SSID, but the underlying lwIP netif comes up
+     * asynchronously a moment later. Phones that DHCPDISCOVER in that
+     * gap get no response and surface as "network temporarily unavailable"
+     * (iOS) or "obtaining IP address" forever (Android). 1.2 s settle is
+     * empirically enough for bk_netif_set_ip4_config(NETIF_IF_AP, ...) to
+     * finish and the dhcps task to be ready. Cheap to wait once at AP-mode
+     * entry; the user is in provisioning anyway. */
+    if (rt == OPRT_OK) {
+        tal_system_sleep(1200);
+        PR_NOTICE("[AP] netif settle complete, ready for DHCP");
+    }
+
     if (rt == OPRT_OK) {
         /* CP22: surface the SSID + URL on the LCD so the user knows what to do.
          * Without this, the user sees only the bionic-eye animation and has no
