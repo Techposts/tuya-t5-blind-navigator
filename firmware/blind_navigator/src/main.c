@@ -67,6 +67,9 @@ static void nav_audio_frame_cb(uint8_t type, uint8_t status, uint8_t *data, uint
 /* CP12d: forward decl so wake_word_cb can fire NAVIGATE */
 static void touch_tap_trigger(void);
 void nav_wifi_forget(void);  /* CP21: defined further down; declared here so btn_cb can call it */
+/* v0.3.5: forward-declare settings accessors so proc_th can read them
+ * before they're defined later in the file. */
+extern void nav_settings_get_language(char *out, size_t n);
 static const char *s_active_prompt = NAV_VISION_PROMPT;
 /* CP9: last spoken response, kept for double-tap-to-repeat */
 static char s_last_response[1024] = "";
@@ -128,6 +131,12 @@ static void play_response(const char *text) {
  * computed from the running byte counter (s_pending_total_bytes) that
  * the chunk callback maintains. */
 static uint32_t s_pending_total_bytes = 0;
+/* v0.3.5: timestamp at start of TTS streaming so play_response_wait can
+ * subtract "audio that already played during the network transfer" from
+ * the post-STOP sleep. Without this we sleep the full audio_ms even though
+ * chunks have been playing throughout the multi-second download, and the
+ * SPEAKING screen lingers for several seconds after the speaker is silent. */
+static uint32_t s_stream_start_ms = 0;
 
 static int on_tts_chunk(void *ctx, const uint8_t *data, size_t len) {
     (void)ctx;
@@ -144,6 +153,7 @@ static void play_response_kick(const char *text) {
     nav_display_set_state(DISP_STATE_SPEAKING);
     s_pending_total_bytes = 0;
     s_play_interrupt = 0;  /* v0.3.5: clear any stale interrupt before this round */
+    s_stream_start_ms = (uint32_t)tal_system_get_millisecond();
 
     /* v0.3.5: single retry on stream failure / empty response. User
      * reported NAVIGATE/READ produced no audio about 2/3 of the time on
@@ -186,23 +196,33 @@ static void play_response_wait(void) {
      * safety margin if the player hasn't drained yet. Audio integrity
      * over animation precision -- the SPEAKING screen may linger a
      * second or two after the last word, that's acceptable. */
-    uint32_t bytes = s_pending_total_bytes > 44 ? s_pending_total_bytes - 44 : 0;
-    int duration_ms = (int)(bytes / 32);
-    if (duration_ms < 1500)  duration_ms = 1500;
-    if (duration_ms > 30000) duration_ms = 30000;
-    PR_NOTICE("[AUDIO] wait: streamed=%u expected_ms=%d",
-              (unsigned)s_pending_total_bytes, duration_ms);
+    /* v0.3.5: time-tracked wait. Total audio duration is bytes/32 ms.
+     * With chunked streaming, audio has been playing throughout the network
+     * transfer (s_stream_start_ms → now). The post-STOP drain we actually
+     * need is `audio_ms - elapsed_ms`. Bound 0 below (if streaming took
+     * longer than audio there's nothing to wait for) and 8 s above (rare
+     * edge case where the player is genuinely backlogged). */
+    uint32_t bytes    = s_pending_total_bytes > 44 ? s_pending_total_bytes - 44 : 0;
+    int audio_ms      = (int)(bytes / 32);
+    uint32_t now_ms   = (uint32_t)tal_system_get_millisecond();
+    int elapsed_ms    = (int)(now_ms - s_stream_start_ms);
+    int remaining_ms  = audio_ms - elapsed_ms;
+    if (remaining_ms < 200)  remaining_ms = 200;     /* tiny grace for last-chunk drain */
+    if (remaining_ms > 8000) remaining_ms = 8000;
+    PR_NOTICE("[AUDIO] wait: audio_ms=%d elapsed=%d remaining=%d",
+              audio_ms, elapsed_ms, remaining_ms);
 
     int slept = 0;
-    while (slept < duration_ms) {
+    while (slept < remaining_ms) {
         if (s_play_interrupt) {
-            PR_NOTICE("[AUDIO] wait interrupted by user tap at %d/%d ms", slept, duration_ms);
+            PR_NOTICE("[AUDIO] wait interrupted by user at %d/%d ms", slept, remaining_ms);
             break;
         }
         tal_system_sleep(100); slept += 100;
     }
 
-    int tail = 30;
+    /* Tail: poll is_playing briefly with interrupt check. */
+    int tail = 15;
     while (!s_play_interrupt && ai_audio_player_is_playing() && tail--) tal_system_sleep(100);
 
     s_pending_total_bytes = 0;
@@ -326,8 +346,31 @@ static void proc_th(void *arg) {
         nav_display_randomize_think_bars();
         nav_display_set_state(DISP_STATE_PROCESSING);
 
+        /* v0.3.5: multilingual support. The /settings page lets the user pick
+         * EN / ES / HI / AR but v0.3.4 stored the choice in KV without ever
+         * applying it. Build a language-aware prompt by appending an explicit
+         * language directive to the active prompt template. GPT-4o-mini and
+         * gpt-4o-mini-tts both handle Hindi / Spanish / Arabic natively, so
+         * the model picks up on the directive and emits the SPOKEN line in
+         * the requested language. The structured fields (PATH STATUS, WHERE,
+         * etc.) stay in English by design -- they're for display and easier
+         * to skim across languages. */
+        char lang_code[16] = {0};
+        nav_settings_get_language(lang_code, sizeof(lang_code));
+        const char *lang_name = "English";
+        if      (strcmp(lang_code, "HI") == 0) lang_name = "Hindi";
+        else if (strcmp(lang_code, "ES") == 0) lang_name = "Spanish";
+        else if (strcmp(lang_code, "AR") == 0) lang_name = "Arabic";
+        char prompt_buf[1536];
+        snprintf(prompt_buf, sizeof(prompt_buf),
+                 "%s\n\nIMPORTANT: Write the SPOKEN line in %s. Keep the other "
+                 "fields (PATH STATUS, WHERE, ACTION, WHY) in English for the "
+                 "display.",
+                 s_active_prompt, lang_name);
+        PR_NOTICE("[LANG] using language=%s for SPOKEN", lang_name);
+
         char *resp = NULL;
-        if (openai_ask_image(jpeg, jlen, s_active_prompt, &resp) == OPRT_OK) {
+        if (openai_ask_image(jpeg, jlen, prompt_buf, &resp) == OPRT_OK) {
             /* CP10: parse labeled-line response, populate structured display
              * with the 4 (label, value) pairs, then TTS the SPOKEN line. */
             parsed_resp_t pr;
@@ -369,10 +412,16 @@ static void proc_th(void *arg) {
         play_response("Camera error. Lens may be covered. Wipe and try again.");
     }
     /* CP11: linger on speaking screen so user/onlooker can read the structured
-     * response. State stays SPEAKING (or ERROR) for 4 seconds after TTS ends,
-     * then transitions to IDLE. Without this, the screen flashed for ~150ms
-     * after speech ended and the user saw nothing. */
-    tal_system_sleep(4000);
+     * response. State stays SPEAKING (or ERROR) for up to 4 seconds after
+     * TTS ends, then transitions to IDLE. v0.3.5: interruptible. If the user
+     * taps / swipes / presses the button during the linger, s_play_interrupt
+     * is set and we exit immediately so the device feels responsive. */
+    {
+        int linger = 0;
+        while (linger < 4000 && !s_play_interrupt) {
+            tal_system_sleep(100); linger += 100;
+        }
+    }
     nav_display_set_state(DISP_STATE_IDLE);
     s_idle = 1;
     tal_thread_delete(s_th); s_th = NULL;
@@ -405,7 +454,15 @@ static void touch_tap_trigger(void) {
 
 /* IRIS Cp5: swipe gesture handlers */
 static void touch_swipe_up_trigger(void) {
-    if (!s_idle) return;
+    if (!s_idle) {
+        /* v0.3.5: any swipe during SPEAKING acts as interrupt, same as tap. */
+        if (nav_display_get_state() == DISP_STATE_SPEAKING) {
+            PR_NOTICE("[GESTURE] swipe-up during SPEAKING -- interrupting playback");
+            s_play_interrupt = 1;
+            ai_audio_player_stop(AI_AUDIO_PLAYER_FG);
+        }
+        return;
+    }
     nav_display_show_mode_banner("IDENTIFY", 0xE879F9);
     s_active_prompt = NAV_OBJECT_PROMPT;
     s_idle = 0;
@@ -414,7 +471,14 @@ static void touch_swipe_up_trigger(void) {
 }
 
 static void touch_swipe_down_trigger(void) {
-    if (!s_idle) return;
+    if (!s_idle) {
+        if (nav_display_get_state() == DISP_STATE_SPEAKING) {
+            PR_NOTICE("[GESTURE] swipe-down during SPEAKING -- interrupting playback");
+            s_play_interrupt = 1;
+            ai_audio_player_stop(AI_AUDIO_PLAYER_FG);
+        }
+        return;
+    }
     nav_display_show_mode_banner("READ", 0xFFB347);
     s_active_prompt = NAV_READ_PROMPT;
     s_idle = 0;
@@ -1008,6 +1072,24 @@ void nav_app_main(void) {
         } else {
             PR_ERR("[AUDIO] tdl_audio_find failed: %d", rt_open);
         }
+    }
+
+    /* v0.3.5 mic gain boost. User reported wake-word range was ~5 cm with
+     * defaults. Audit found tdd_audio.c:108 has a commented-out
+     * `tkl_ai_set_vol(0, 0, 80)` -- the boot path leaves the BK7258's ADC
+     * gain at hardware default which is far too low for far-field MEMS.
+     *
+     * tkl_ai_set_vol has a side effect of toggling the speaker-enable GPIO
+     * (lines 612-617 in tkl_audio.c) which can mute the speaker. Bypass it
+     * and call the underlying BK SDK directly: `bk_aud_adc_set_gain(value)`
+     * where value is a 6-bit gain (0-0x3F). 50 ≈ 80 % of max. With AEC on
+     * (enabled via CONFIG_TUYA_T5AI_BOARD_VERSION_102), this should restore
+     * usable far-field range -- 1-1.5 m is the realistic ceiling for these
+     * MEMS without beamforming. */
+    {
+        extern int bk_aud_adc_set_gain(uint32_t value);
+        int gr = bk_aud_adc_set_gain(50);
+        PR_NOTICE("[AUDIO] bk_aud_adc_set_gain(50) = %d (mic gain ~80%%)", gr);
     }
 
     ai_audio_player_init();
