@@ -780,6 +780,75 @@ Inline SVG bionic-eye favicon (data URI in `<link rel=icon>`) — outer cyan rin
 
 ---
 
+## v0.3.3 — Wake word + welcome announce + AP-only Wi-Fi · 2026-05-10
+
+The bug-fix release on top of v0.3.2 that closes the "Hi Tuya" wake-word gap, removes the hardcoded Wi-Fi fallback, and gives every fresh boot an audible introduction. Five small surgical edits, no architectural change.
+
+### Bugs fixed
+
+#### 1. "Hi Tuya" wake word never fired (`wake_count` stuck at 0)
+
+The Wanson KWS engine was loaded (model file was present, callback was registered via `tkl_kws_reg_wakeup_cb`) but the engine's I2S capture loop never started, so it never had any audio to score against the model. Saying "Hi Tuya" did nothing.
+
+Root cause: `tkl_kws_reg_wakeup_cb` only stores the callback pointer — it does **not** start the engine. The reference path in TuyaOpen's `ai_chat_main.c` calls `tkl_kws_init()` explicitly right after audio init. We were missing that one call.
+
+Fix: add `tkl_kws_init();` immediately before `tkl_kws_reg_wakeup_cb(wake_word_cb)` in `nav_app_main`. Verified on hardware — saying "Hi Tuya" now fires the NAVIGATE flow without any tap.
+
+#### 2. TEST SPEAKER button got stuck on the speaking screen
+
+Pressing the **TEST SPEAKER** button in the web UI played the welcome TTS, but afterwards the screen stayed on the speaking-state visual (animated eye + waveform) forever. Forced a physical reset.
+
+Root cause: `play_response_kick` sets `DISP_STATE_SPEAKING`, but only the NAVIGATE/READ flow at lines 240-245 of `main.c` owns the IDLE transition. `nav_diag_play_test_alert` borrowed kick+wait without the IDLE cleanup.
+
+Fix: explicit `nav_display_set_state(DISP_STATE_IDLE)` after `play_response_wait` in `nav_diag_play_test_alert`. Plus `s_idle = 1` to re-arm subsequent triggers.
+
+#### 3. TEST SPEAKER while NAVIGATE in flight corrupted the player ring buffer
+
+If you pressed TEST SPEAKER while a real query was still mid-TTS, the static `s_pending_pcm` and the player's ring buffer collided — symptoms `ai_audio_player.c:382 ret:-2` and `player ring buf write failed` on serial.
+
+Fix: `nav_diag_play_test_alert` now refuses (logs `[DIAG] test speaker refused: device busy`) when `s_idle == 0`. Same guard pattern used by NAVIGATE/READ/IDENTIFY entrypoints.
+
+#### 4. "Forget Wi-Fi" hardcoded fallback — planned for removal, **deferred to v0.3.4**
+
+Before v0.3.3, the boot path tried (in order): KV creds → build-time `NAV_SSID_LIST` from `nav_secrets.h` → AP fallback. Pressing "Forget Wi-Fi" cleared KV but the build-time list still let the device attach, defeating the purpose of forgetting.
+
+The plan was to remove the build-time fallback so empty KV → AP-mode-for-provisioning. Late in v0.3.3 testing surfaced a separate AP DHCP issue: post-flash (which wipes KV), the device boots into AP mode, but the DHCP server inside the Tuya AP path is flaky on first connection — phones get "network temporarily unavailable" or a self-assigned 169.254 IP unless they retry several times. Removing the fallback in this state would have trapped the device unrecoverably after every flash for users who couldn't manage the AP retry dance.
+
+Decision: **keep the fallback for v0.3.3, fix AP DHCP first in v0.3.4, then remove the fallback as originally intended.** The fallback's "forget-wifi defeats itself" UX gap remains until both ship.
+
+### New: audible welcome on Wi-Fi connect
+
+After station-mode connect succeeds and the audio chain is up (codec opened, player initialized, volume applied), a brief 3-sentence intro plays via the same TTS pipeline that real responses use:
+
+> "I am IRIS, your vision co-pilot. Tap once to navigate, twice to read text, long press the button to identify objects."
+
+Implemented as `nav_announce_welcome()` in `main.c`. Synchronous: blocks the boot thread for ~5 seconds while TTS downloads + plays. Boot is already 10-15 s, so the extra latency is acceptable for a one-time greeting per power-on. Gracefully no-ops if the proxy is unreachable (TTS download fails → `s_pending_pcm` stays NULL → wait returns immediately → IDLE).
+
+### Known open issues (deferred to v0.3.4)
+
+#### TTS audio cuts off / intermittently silent
+
+A regression introduced by the wake-word fix. With `tkl_kws_init()` now properly starting the KWS engine, the I2S input path is continuously active for wake-word detection. T5AI's audio codec shares I2S lanes between input and output, and the contention surfaces during TTS playback as: (a) the welcome message cutting off before the last sentence, (b) NAVIGATE / READ TTS occasionally not playing at all, (c) when it does play, ending prematurely. Display side is unaffected.
+
+Fix path for v0.3.4: suspend KWS capture during TTS playback (`tkl_kws_stop()` before `play_response_kick`, restart after `play_response_wait`), or move the engine to a second I2S lane if T5AI exposes one. v0.3.3 ships with this tradeoff because wake word working is a bigger user win than glitch-free playback.
+
+#### AP DHCP flakiness on first connect
+
+Post-flash (which wipes KV), device boots into AP mode. Phones see and join the `IRIS-XXXX` SSID, but the first DHCPDISCOVER often gets ignored — phone shows "network temporarily unavailable" or self-assigns a 169.254 address. After 1-3 retries (sometimes 30+ seconds of waiting) the lease eventually arrives.
+
+Hypothesis: race between `bk_wifi_ap_start` returning and `bk_netif_set_ip4_config` actually bringing the netif up. Phone's first DISCOVER lands in the gap. Confirmed AP code matches Tuya's production reference (`ap_netcfg.c:810-846`) byte-for-byte, so this is a platform-level timing issue, not an application bug. Fix likely needs a 500-1000 ms sleep between AP start and "AP ready" signal, or proactive DHCP server warm-up.
+
+#### Captive portal hijack
+
+iOS / Android captive-portal probes (`captive.apple.com`, `connectivitycheck.gstatic.com`) fail because the AP has no internet — phones show "Internet may not be available". Ugly UX. Real fix: minimal DNS hijack on UDP/53 in AP returning `192.168.4.1` for any query. Phone's probe then 302's to our setup page → native "Sign in to network" sheet. ~60 LOC, no lwIP rebuild needed.
+
+### Release artifacts
+
+- **Binary**: `iris_v0.3.3_QIO.bin`
+- **SHA256**: `d191819fb8098eef13d926e2ef08844d84843183cefd45f08e88a22dfc789e7e`
+
+---
+
 ## Deferrals (updated 2026-05-02 after CP11b landed)
 
 | Item | Why deferred |

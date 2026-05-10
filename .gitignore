@@ -28,3 +28,8 @@ releases/*.bin
 *.disabled
 firmware/blind_navigator/GEMINI.md
 
+# Mac-side flashing tools (Python venv + tyutool clone). Recreate via the
+# "Flashing from macOS" wiki page rather than committing.
+tools/
+dist/
+

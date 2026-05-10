@@ -2,7 +2,7 @@
 
 Single source of truth for what's done, what's next, and what's parked. Updated alongside major releases.
 
-**Current release**: `v0.3.2` (2026-05-10) — codec output path fix (`tdl_audio_open` opens audio engine; was returning `-23` on every `tkl_ao_put_frame`) + SPOKEN parser fix (was capping at 4 fields, dropping the 5th line) + audio/display sync via kick+wait split + camera warmup 3500→1500ms + TEST SPEAKER plays TTS welcome message + Mac-side flashing tools + favicon. **Open issue**: "Hi Tuya" wake word not firing reliably (`wake_count` stays 0); deferred to v0.3.3.
+**Current release**: `v0.3.3` (2026-05-10) — wake word "Hi Tuya" now fires reliably (one-line fix: `tkl_kws_init()` was missing) + audible welcome message on first Wi-Fi connect ("I am IRIS, your vision co-pilot...") + TEST SPEAKER restores idle state (no longer stuck on speaking screen) + concurrency guard (`s_idle`) on TEST SPEAKER. **Open issues**: AP DHCP flakiness on first connect (deferred to v0.3.4 along with hardcoded-fallback removal that v0.3.3 was supposed to do — kept for now since AP DHCP isn't reliable). Previous: `v0.3.2` codec output path fix + SPOKEN parser fix + audio/display sync.
 
 ---
 
@@ -121,3 +121,22 @@ The full-product picture:
 Next session focus is **v0.4.0**: lwIP mDNS rebuild (so `iris.local` works), `tal_workq`-deferred audible wake feedback, then sensor stack (LD2450 mmWave + LRA haptic) which becomes the on-device differentiator vs cloud-only assistants.
 
 The 180-day no-delete clause on the partnership video means v0.2.0 source must remain available and buildable through 2026-10-29. v0.3.0 is additive on top of that baseline.
+
+---
+
+## Status as of 2026-05-10 (post-v0.3.3)
+
+**v0.3.2 shipped earlier today** with the codec-output silent-audio fix, SPOKEN parser fix, and audio/display sync.
+
+**v0.3.3 shipped this evening** to close the wake-word gap that was the only remaining v0.3.2 known issue. Three small surgical fixes:
+
+- `tkl_kws_init()` was missing — only the callback registration was being called. Engine loaded the model but never started the I2S capture loop, so `wake_count` stayed at 0 forever. One added line; verified working on hardware ("Hi Tuya" now fires NAVIGATE).
+- TEST SPEAKER button no longer leaves the device stuck on the speaking screen — explicit `nav_display_set_state(DISP_STATE_IDLE)` after the welcome plays.
+- Audible welcome message on first Wi-Fi connect (3 sentences via TTS) so a first-time user knows what the device does.
+
+**v0.3.4 priorities** (next session):
+
+1. **AP DHCP flakiness fix** — surfaced during v0.3.3 testing. Phones sometimes get "network temporarily unavailable" / no IP on first AP connect attempt (succeeds after retries). Probable platform-timing race between `bk_wifi_ap_start` and `bk_netif_set_ip4_config`. Needs serial-log capture during a failing association.
+2. **Captive-portal hijack** — minimal DNS server on UDP/53 in AP returning 192.168.4.1 for any query. Triggers iOS / Android "Sign in to network" sheet. ~60 LOC, no lwIP rebuild.
+3. **Remove hardcoded NAV_SSID_LIST fallback** — was originally planned for v0.3.3 but kept because AP DHCP wasn't reliable enough to be the only post-flash provisioning path. After (1) lands, this is safe.
+4. **Multi-mode framework** (Vision Co-Pilot + Explore & Learn modes) and **180° rotation toggle** in /settings — strategic asks deferred from v0.3.3 due to scope.
